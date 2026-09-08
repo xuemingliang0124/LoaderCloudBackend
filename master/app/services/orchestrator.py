@@ -73,7 +73,7 @@ async def create_run(
                 "url": await storage.presigned_get(script.file_key),
             }
         ]
-        for df in (script.data_files or []):
+        for df in script.data_files or []:
             files.append(
                 {
                     "key": df["key"],
@@ -86,11 +86,15 @@ async def create_run(
             aid: {
                 "jtl": {
                     "key": f"runs/{run_no}/{aid}/result.jtl",
-                    "url": await storage.presigned_put(f"runs/{run_no}/{aid}/result.jtl"),
+                    "url": await storage.presigned_put(
+                        f"runs/{run_no}/{aid}/result.jtl"
+                    ),
                 },
                 "report": {
                     "key": f"runs/{run_no}/{aid}/report.zip",
-                    "url": await storage.presigned_put(f"runs/{run_no}/{aid}/report.zip"),
+                    "url": await storage.presigned_put(
+                        f"runs/{run_no}/{aid}/report.zip"
+                    ),
                 },
             }
             for aid in agent_ids
@@ -106,7 +110,9 @@ async def create_run(
     return {"run_no": run_no, "agent_ids": agent_ids}
 
 
-async def dispatch(run_no: str, agent_ids: list[str], task_data: dict, upload_urls: dict) -> None:
+async def dispatch(
+    run_no: str, agent_ids: list[str], task_data: dict, upload_urls: dict
+) -> None:
     """向选中 Agent 下发任务（每个 Agent 嵌入自己的上传目标），按实际送达情况更新执行记录。"""
     sent = []
     for aid in agent_ids:
@@ -116,7 +122,14 @@ async def dispatch(run_no: str, agent_ids: list[str], task_data: dict, upload_ur
             sent.append(aid)
 
     if sent:
-        _pending_results[run_no] = {"agents": set(sent), "done": set(), "failed": set()}
+        # results: agent_id -> {"summary": dict, "artifacts": list}
+        # 收齐所有 Agent 后再合并写 pt-summary；骨架原版只存 done set 会丢失
+        # 前面 Agent 的 summary/artifacts（最终写入的是最后一个 Agent 的数据）
+        _pending_results[run_no] = {
+            "agents": set(sent),
+            "results": {},
+            "failed": set(),
+        }
     async with SessionLocal() as db:
         await db.execute(
             update(ScenarioRun)
@@ -134,7 +147,11 @@ async def dispatch(run_no: str, agent_ids: list[str], task_data: dict, upload_ur
 async def stop_run(run_no: str) -> None:
     """停止执行：广播 stop 指令（幂等），Agent 杀进程树后回报。"""
     async with SessionLocal() as db:
-        run = (await db.execute(select(ScenarioRun).where(ScenarioRun.run_no == run_no))).scalars().first()
+        run = (
+            (await db.execute(select(ScenarioRun).where(ScenarioRun.run_no == run_no)))
+            .scalars()
+            .first()
+        )
         if run is None:
             raise BusinessError("执行记录不存在", code=2003)
         agent_ids = run.agent_ids or []
@@ -156,23 +173,87 @@ async def stop_run(run_no: str) -> None:
     logger.info(f"run={run_no} 已下发停止指令到 {len(sent)} 台 Agent")
 
 
-async def on_agent_result(run_no: str, agent_id: str, summary: dict, artifacts: list) -> None:
-    """汇聚各 Agent 结果：全部收齐后合并写 ES 汇总索引并置终态。"""
+def _merge_summaries(summaries: list[dict]) -> dict:
+    """合并多 Agent 的 summary，按 label 聚合。
+
+    合并口径：
+    - samples/errors：直接累加（各 Agent 独立加压，总量有意义）
+    - p95_rt：取 max（保守口径，代表整体瓶颈；跨进程精确 p95 需各 Agent 上报
+      延迟分桶或原始延迟数组，留 P2）
+    - max_tps：取 max（峰值不累加，因各 Agent 时间轴可能错峰；真实聚合峰值
+      需各 Agent 上报 interval 级 tps 序列对齐求和，留 P2）
+    - by_label：union 所有 label，按 samples 降序
+    """
+    totals = {"samples": 0, "errors": 0, "p95_rt": 0.0, "max_tps": 0.0}
+    by_label: dict[str, dict] = {}
+    for s in summaries:
+        totals["samples"] += int(s.get("samples") or 0)
+        totals["errors"] += int(s.get("errors") or 0)
+        totals["p95_rt"] = max(totals["p95_rt"], float(s.get("p95_rt") or 0.0))
+        totals["max_tps"] = max(totals["max_tps"], float(s.get("max_tps") or 0.0))
+        for item in s.get("by_label") or []:
+            label = item.get("label") or "_unknown"
+            bucket = by_label.setdefault(
+                label,
+                {
+                    "label": label,
+                    "samples": 0,
+                    "errors": 0,
+                    "p95_rt": 0.0,
+                    "max_tps": 0.0,
+                },
+            )
+            bucket["samples"] += int(item.get("samples") or 0)
+            bucket["errors"] += int(item.get("errors") or 0)
+            bucket["p95_rt"] = max(bucket["p95_rt"], float(item.get("p95_rt") or 0.0))
+            bucket["max_tps"] = max(
+                bucket["max_tps"], float(item.get("max_tps") or 0.0)
+            )
+    by_label_sorted = sorted(
+        by_label.values(), key=lambda x: x["samples"], reverse=True
+    )
+    return {
+        "samples": totals["samples"],
+        "errors": totals["errors"],
+        "p95_rt": totals["p95_rt"],
+        "max_tps": totals["max_tps"],
+        "by_label": by_label_sorted,
+    }
+
+
+async def on_agent_result(
+    run_no: str, agent_id: str, summary: dict, artifacts: list
+) -> None:
+    """汇聚各 Agent 结果：全部收齐后按 label 合并写 ES 汇总索引并置终态。"""
     pending = _pending_results.get(run_no)
     if pending is None:
         logger.warning(f"收到未知 run 的结果: run={run_no} agent={agent_id}")
         return
 
-    pending["done"].add(agent_id)
+    pending["results"][agent_id] = {"summary": summary, "artifacts": artifacts}
     if summary.get("failed"):
         pending["failed"].add(agent_id)
-    logger.info(f"run={run_no} 收到 {agent_id} 结果 {len(pending['done'])}/{len(pending['agents'])}")
+    done = set(pending["results"].keys())
+    logger.info(
+        f"run={run_no} 收到 {agent_id} 结果 {len(done)}/{len(pending['agents'])}"
+    )
 
-    if pending["done"] >= pending["agents"]:
+    if done >= pending["agents"]:
         status = RunStatus.FINISHED if not pending["failed"] else RunStatus.PARTIAL
-        # TODO P1: 各 Agent 分片 summary 按 label 合并去重后再写入
+        merged_summary = _merge_summaries(
+            [r["summary"] for r in pending["results"].values()]
+        )
+        all_artifacts: list = []
+        for aid in sorted(done):
+            all_artifacts.extend(pending["results"][aid]["artifacts"])
         await es_client.write_summary(
-            run_no, {"agents": sorted(pending["done"]), "summary": summary, "artifacts": artifacts}
+            run_no,
+            {
+                "agents": sorted(done),
+                "failed_agents": sorted(pending["failed"]),
+                "summary": merged_summary,
+                "artifacts": all_artifacts,
+            },
         )
         async with SessionLocal() as db:
             await db.execute(

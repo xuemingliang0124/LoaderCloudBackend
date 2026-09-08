@@ -42,6 +42,9 @@ class JMeterRunner:
             "-t", jmx_path,
             "-l", jtl_path,
             "-e", "-o", report_dir,
+            # 逐行落盘 JTL：默认 false 会缓冲到测试结束才 flush，
+            # 增量 tail 解析（_metrics_loop）将读不到实时数据
+            "-Jjmeter.save.saveservice.autoflush=true",
         ]
         for key, value in jmeter_args.items():
             cmd.append(f"-J{key}={value}")

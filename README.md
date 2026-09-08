@@ -71,9 +71,9 @@ uvicorn app.main:app --reload
 
 - [x] Agent 文件下载（MinIO presigned）与产物上传
 - [x] Agent 镜像内置 JMeter 5.6.3 + 第三方插件（按需在 `agent/Dockerfile` 增补 jar）
-- [ ] JTL 增量解析产出真实指标 — `agent/pt_agent/executor.py` `_metrics_loop`（当前上报占位零值）
-- [ ] Master 结果分片按 label 合并去重 — `master/app/services/orchestrator.py` `on_agent_result`
-- [ ] JMeter 真实汇总解析（samples/errors/p95/max_tps）— `executor.py` `_execute` summary 占位
+- [x] JTL 增量解析产出实时指标 — `agent/pt_agent/jtl_parser.py` `parse_increment` + `executor.py` `_metrics_loop`
+- [x] Master 结果分片按 label 合并去重 — `master/app/services/orchestrator.py` `_merge_summaries` + `on_agent_result`
+- [x] JMeter 真实汇总解析（samples/errors/p95/max_tps/by_label）— `agent/pt_agent/jtl_parser.py` + `executor.py` `_execute`
 
 ### P2 — 生产化
 

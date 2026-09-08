@@ -15,7 +15,7 @@ MSG_HEARTBEAT = "heartbeat"  # data: cpu, mem, net_in, net_out, status, current_
 MSG_TASK_ACK = "task_ack"    # data: run_id, accepted, message
 MSG_STATUS = "status"        # data: run_id, phase, message
 MSG_METRICS = "metrics"      # data: run_no, interval_tps, avg_rt, p95_rt, err_rate, threads, by_label[]
-MSG_RESULT = "result"        # data: run_id, summary, artifacts
+MSG_RESULT = "result"        # data: run_id, summary{samples,errors,p95_rt,max_tps,failed,by_label[{label,samples,errors,p95_rt,max_tps}]}, artifacts
 
 # Master -> Agent
 MSG_TASK = "task"           # data: run_id, files[{key,save_as,url}], upload{jtl{key,url},report{key,url}}, jmeter_args, start_at
