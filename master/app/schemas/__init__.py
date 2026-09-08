@@ -1,0 +1,100 @@
+"""请求/响应模型：auth / agent / run / script / scenario / schedule。"""
+
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class AgentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    agent_id: str
+    ip: str
+    hostname: str
+    tags: list | None
+    jmeter_version: str
+    status: str
+    cpu_percent: float
+    mem_percent: float
+    current_run_no: str | None
+    last_heartbeat: datetime | None
+
+
+class RunCreateIn(BaseModel):
+    scenario_id: int
+    # 不传则按场景配置自动选机
+    agent_ids: list[str] | None = None
+
+
+class RunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    run_no: str
+    scenario_id: int
+    status: str
+    trigger: str
+    agent_ids: list | None
+    start_time: datetime | None
+    end_time: datetime | None
+    error_message: str
+    created_by: str
+
+
+class ScriptOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    version: str
+    file_key: str
+    data_files: list | None
+    params: list | None
+    description: str
+
+
+class ScenarioIn(BaseModel):
+    name: str
+    script_id: int
+    param_overrides: dict = {}
+    agent_tags: list[str] = []
+    agent_count: int = 1
+    duration: int = 300
+    description: str = ""
+
+
+class ScenarioOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    script_id: int
+    param_overrides: dict | None
+    agent_tags: list | None
+    agent_count: int
+    duration: int
+    description: str
+
+
+class ScheduleIn(BaseModel):
+    name: str
+    scenario_id: int
+    # 标准 5 段 crontab：分 时 日 月 周
+    cron: str
+
+
+class ScheduleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    scenario_id: int
+    cron: str
+    enabled: bool
+    last_run_no: str | None

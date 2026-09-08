@@ -1,0 +1,40 @@
+# 压力机侧：Agent 容器（内置 OpenJDK + JMeter）
+#
+# Linux 压测机（生产推荐）：启用 network_mode: host，绕过 Docker bridge NAT，
+#   保证 JMeter 压测吞吐量；专机压测可不设资源限制以跑满整机。
+# Windows/Mac（Docker Desktop，仅本地验证）：host 网络模式不可用，保留 bridge。
+#
+# Linux 启动：
+#   MASTER_WS_URL=ws://<master-host>:8000/ws/agent AGENT_ID=agent-01 TAGS=机房A \
+#     docker compose -f deploy/docker-compose.agent.yml up -d --build
+
+name: ptp-agent
+
+services:
+  agent:
+    build: ../agent
+    # Linux 压测机取消下一行注释以使用 host 网络（生产必须）
+    # network_mode: host
+    environment:
+      MASTER_WS_URL: ${MASTER_WS_URL:-ws://host.docker.internal:8000/ws/agent}
+      AGENT_ID: ${AGENT_ID:-}
+      TAGS: ${TAGS:-default}
+      JMETER_BIN: jmeter
+    # host 网络下 extra_hosts 无效；bridge 模式下用于回连宿主机 Master
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 工作目录挂到宿主机 SSD，避免 overlay2 拖慢 JTL/报告 I/O
+    volumes:
+      - ${AGENT_WORKSPACE:-/data/ptp_agent/workspace}:/app/agent_workspace
+    # 高并发压测需要的文件描述符与端口范围
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+      net.ipv4.tcp_tw_reuse: "1"
+    # 专机压测建议不加资源限制；共享机按需打开
+    # cpus: "4"
+    # mem_limit: 8g
+    restart: unless-stopped

@@ -1,0 +1,11 @@
+server.host: "0.0.0.0"
+server.name: "ptp-kibana"
+
+# 连接同 compose 网络内的 Elasticsearch（ES 已关闭安全认证，无需凭证）
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+
+# 中文界面
+i18n.locale: "zh-CN"
+
+# 监控采集
+monitoring.ui.container.elasticsearch.enabled: true
