@@ -90,8 +90,14 @@ async def write_summary(run_no: str, summary: dict) -> None:
 
 async def query_timeseries(
     run_no: str, start_ts: int, end_ts: int, interval_s: int = 15
-) -> dict:
-    """按 label 维度聚合时间序列，供前端曲线渲染。"""
+) -> list[dict]:
+    """按 label 维度聚合时间序列，拍平为前端直接消费的点列表。
+
+    返回：[{"ts": <unix秒>, "label": str, "tps": float,
+           "avg_rt": float(ms), "error_rate": float(百分比)}]
+    注意：ES 中 err_rate 存的是 0~1 比率（errors/samples），此处 *100 转百分比；
+    ts 取 date_histogram 桶 key（epoch 毫秒）//1000，绝对时区无关。
+    """
     body = {
         "size": 0,
         "query": {
@@ -122,4 +128,20 @@ async def query_timeseries(
         },
     }
     resp = await get_es().search(body=body, index=f"{get_settings().es_index_prefix}-metrics-*")
-    return resp.get("aggregations", {})
+
+    # 拍平 ES 嵌套聚合为点列表：by_label.buckets[].over_time.buckets[]
+    points: list[dict] = []
+    for label_bucket in (resp.get("aggregations", {}) or {}).get("by_label", {}).get("buckets", []):
+        label = label_bucket.get("key")
+        for tb in (label_bucket.get("over_time", {}) or {}).get("buckets", []):
+            points.append(
+                {
+                    "ts": int(tb["key"]) // 1000,
+                    "label": label,
+                    "tps": round(tb.get("tps", {}).get("value") or 0.0, 3),
+                    "avg_rt": round(tb.get("rt", {}).get("value") or 0.0, 2),
+                    "error_rate": round((tb.get("err", {}).get("value") or 0.0) * 100, 2),
+                }
+            )
+    points.sort(key=lambda p: (p["ts"], str(p["label"])))
+    return points

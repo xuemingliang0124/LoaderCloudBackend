@@ -13,7 +13,8 @@ class AgentNode(Base, IntPkMixin, TimestampMixin):
     __tablename__ = "agent_node"
 
     agent_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    ip: Mapped[str] = mapped_column(String(64), default="")
+    # 宿主机 IP：Agent 启动时按此查固定 agent_id，建索引
+    ip: Mapped[str] = mapped_column(String(64), default="", index=True)
     hostname: Mapped[str] = mapped_column(String(128), default="")
     # 分组标签，如 ["机房A", "高配"]
     tags: Mapped[list | None] = mapped_column(JSON, default=list)

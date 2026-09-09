@@ -1,5 +1,6 @@
 """Agent 注册中心：注册、心跳、超时判定、选机调度。"""
 
+import uuid
 from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
@@ -11,6 +12,48 @@ from app.models.agent_node import AgentNode
 from app.models.enums import AgentStatus
 
 
+async def register_by_ip(
+    ip: str,
+    hostname: str = "",
+    tags: list[str] | None = None,
+    jmeter_version: str = "",
+) -> tuple[AgentNode, bool]:
+    """Agent 启动注册：按宿主机 IP 查固定 agent_id。
+
+    - IP 已存在：返回既有节点（agent_id 保持不变），顺带刷新 hostname/tags/版本
+    - IP 不存在：生成 agent-<uuid8> 新建节点（OFFLINE，WS 握手后转 ONLINE）
+
+    返回 (节点, is_new)。
+    """
+    async with SessionLocal() as db:
+        node = (
+            (await db.execute(select(AgentNode).where(AgentNode.ip == ip)))
+            .scalars()
+            .first()
+        )
+        if node is not None:
+            node.hostname = hostname or node.hostname
+            if tags:
+                node.tags = tags
+            node.jmeter_version = jmeter_version or node.jmeter_version
+            await db.commit()
+            await db.refresh(node)
+            return node, False
+
+        node = AgentNode(
+            agent_id=f"agent-{uuid.uuid4().hex[:8]}",
+            ip=ip,
+            hostname=hostname,
+            tags=tags or [],
+            jmeter_version=jmeter_version,
+            status=AgentStatus.OFFLINE,
+        )
+        db.add(node)
+        await db.commit()
+        await db.refresh(node)
+        return node, True
+
+
 async def upsert_agent(
     agent_id: str,
     ip: str = "",
@@ -20,7 +63,11 @@ async def upsert_agent(
 ) -> None:
     """Agent 注册/上线刷新（WS 握手时调用）。"""
     async with SessionLocal() as db:
-        node = (await db.execute(select(AgentNode).where(AgentNode.agent_id == agent_id))).scalars().first()
+        node = (
+            (await db.execute(select(AgentNode).where(AgentNode.agent_id == agent_id)))
+            .scalars()
+            .first()
+        )
         if node is None:
             db.add(
                 AgentNode(
@@ -94,7 +141,9 @@ async def mark_stale_agents_offline(connected_ids: set[str]) -> int:
 
 
 async def list_agents(db: AsyncSession) -> list[AgentNode]:
-    return list((await db.execute(select(AgentNode).order_by(AgentNode.id))).scalars().all())
+    return list(
+        (await db.execute(select(AgentNode).order_by(AgentNode.id))).scalars().all()
+    )
 
 
 async def select_agents(tags: list[str], count: int) -> list[str]:

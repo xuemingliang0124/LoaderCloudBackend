@@ -26,6 +26,22 @@ class AgentOut(BaseModel):
     last_heartbeat: datetime | None
 
 
+class AgentRegisterIn(BaseModel):
+    # Agent 启动时上报的宿主机 IP（Master 据此返回固定 agent_id）
+    ip: str
+    hostname: str = ""
+    tags: list[str] = []
+    jmeter_version: str = ""
+
+
+class AgentRegisterOut(BaseModel):
+    agent_id: str
+    ip: str
+    hostname: str
+    # true 表示首次注册（Master 新建了节点）
+    is_new: bool
+
+
 class RunCreateIn(BaseModel):
     scenario_id: int
     # 不传则按场景配置自动选机

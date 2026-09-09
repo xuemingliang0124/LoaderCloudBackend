@@ -61,6 +61,7 @@ services:
   master:
     build: ../master
     environment:
+      TZ: Asia/Shanghai
       DEBUG: "true"
       SECRET_KEY: change-me-in-production
       MYSQL_HOST: mysql

@@ -24,9 +24,17 @@ from pt_agent.state import AgentState
 
 
 class Reporter:
-    def __init__(self, settings: AgentSettings, state: AgentState) -> None:
+    def __init__(
+        self,
+        settings: AgentSettings,
+        state: AgentState,
+        ip: str = "",
+        hostname: str = "",
+    ) -> None:
         self._settings = settings
         self._state = state
+        self._ip = ip
+        self._hostname = hostname
         self._executor = None  # 延迟绑定（main 装配），避免与 executor 循环依赖
         self._ws = None
         self._connected = asyncio.Event()
@@ -50,21 +58,33 @@ class Reporter:
             self._connected.clear()
             return False
 
-    async def send_task_ack(self, run_id: str, accepted: bool, message: str = "") -> bool:
+    async def send_task_ack(
+        self, run_id: str, accepted: bool, message: str = ""
+    ) -> bool:
         return await self.send(
-            Envelope.now(MSG_TASK_ACK, {"run_id": run_id, "accepted": accepted, "message": message})
+            Envelope.now(
+                MSG_TASK_ACK,
+                {"run_id": run_id, "accepted": accepted, "message": message},
+            )
         )
 
     async def send_status(self, run_id: str, phase, message: str = "") -> bool:
         return await self.send(
-            Envelope.now(MSG_STATUS, {"run_id": run_id, "phase": phase.value, "message": message})
+            Envelope.now(
+                MSG_STATUS, {"run_id": run_id, "phase": phase.value, "message": message}
+            )
         )
 
     async def run_forever(self) -> None:
         """主循环：连接 → 注册 → 收消息；断线指数退避重连。"""
         settings = self._settings
         query = urlencode(
-            {"agent_id": settings.resolved_agent_id, "tags": ",".join(settings.tag_list)}
+            {
+                "agent_id": settings.resolved_agent_id,
+                "tags": ",".join(settings.tag_list),
+                "ip": self._ip,
+                "hostname": self._hostname,
+            }
         )
         url = f"{settings.master_ws_url}?{query}"
         delay = 1.0
@@ -76,7 +96,9 @@ class Reporter:
                     delay = 1.0
                     logger.info(f"已连接 Master: {settings.master_ws_url}")
                     await self.send(
-                        Envelope.now(MSG_REGISTER, {"agent_id": settings.resolved_agent_id})
+                        Envelope.now(
+                            MSG_REGISTER, {"agent_id": settings.resolved_agent_id}
+                        )
                     )
                     heartbeat = asyncio.create_task(self._heartbeat_loop())
                     try:

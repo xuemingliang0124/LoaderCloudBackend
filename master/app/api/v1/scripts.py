@@ -11,7 +11,7 @@ from app.db.session import get_db
 from app.models.script import Script
 from app.schemas import ScriptOut
 from app.schemas.common import ok
-from app.services import storage
+from app.services import jmx_checker, storage
 from app.services.exceptions import BusinessError
 
 router = APIRouter()
@@ -52,13 +52,22 @@ async def upload_script(
         if not df_name:
             raise BusinessError("数据文件缺少 filename", code=3003)
         if not df_name.lower().endswith(_DATA_FILE_EXTS):
-            raise BusinessError(f"数据文件仅支持 {'/'.join(_DATA_FILE_EXTS)}: {df_name}", code=3003)
+            raise BusinessError(
+                f"数据文件仅支持 {'/'.join(_DATA_FILE_EXTS)}: {df_name}", code=3003
+            )
         if df_name in seen:
             raise BusinessError(f"数据文件重名: {df_name}", code=3004)
         seen.add(df_name)
         clean_data_files.append(df)
 
     jmx_data = await file.read()
+
+    # 校验 JMX 引用的 CSV 数据文件是否已全部上传
+    uploaded_names = {df.filename or "" for df in clean_data_files}
+    missing = jmx_checker.check_data_files_complete(jmx_data, uploaded_names)
+    if missing:
+        raise BusinessError(f"缺少数据文件: {', '.join(missing)}", code=3006)
+
     script = Script(
         name=name or filename.rsplit(".", 1)[0],
         version=version,
