@@ -7,6 +7,7 @@ from app.api.v1 import (
     auth,
     health,
     metrics,
+    plugins,
     runs,
     scenarios,
     schedules,
@@ -17,6 +18,7 @@ api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(auth.router, tags=["auth"])
 api_router.include_router(agents.router, tags=["agents"])
+api_router.include_router(plugins.router, tags=["plugins"])
 api_router.include_router(scripts.router, tags=["scripts"])
 api_router.include_router(scenarios.router, tags=["scenarios"])
 api_router.include_router(runs.router, tags=["runs"])

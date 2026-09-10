@@ -1,4 +1,8 @@
-"""JMeter 脚本表：文件存 MinIO，占位符参数定义随脚本维护。"""
+"""JMeter 脚本表：文件存 MinIO，占位符参数定义随脚本维护。
+
+插件依赖不再在脚本级声明：已迁移到全局插件池 jmeter_plugin 表，
+由 PluginSyncer 在 Agent 启动/在线推送时统一对齐 plugin_dir。
+"""
 
 from sqlalchemy import JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -18,8 +22,6 @@ class Script(Base, IntPkMixin, TimestampMixin):
     data_files: Mapped[list | None] = mapped_column(JSON, default=list)
     # 占位符定义 [{"key": "threads", "default": "10", "desc": "并发线程数"}]
     params: Mapped[list | None] = mapped_column(JSON, default=list)
-    # 第三方插件依赖 [{"key": "scripts/{id}/{version}/plugins/x.jar", "filename": "x.jar"}]
-    # 下发时校验 Agent 已装；缺失则随任务下发，Agent 运行时装入 plugin_dir（免改镜像）
-    plugins: Mapped[list | None] = mapped_column(JSON, default=list)
+    # 历史 plugins 字段已下线：插件归 jmeter_plugin 表统一管理
     description: Mapped[str] = mapped_column(String(512), default="")
     created_by: Mapped[str] = mapped_column(String(64), default="")

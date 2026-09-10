@@ -62,6 +62,13 @@ async def lifespan(_: FastAPI):
     await user_service.ensure_default_user()
     await _retry("Elasticsearch", es_client.ensure_indices)
     await _retry("MinIO", storage.ensure_bucket)
+    # 一次性迁移历史脚本级插件到全局插件池（jmeter_script.plugins → jmeter_plugin）
+    try:
+        from app.services.plugin_sync import recover_legacy_script_plugins
+
+        await recover_legacy_script_plugins()
+    except Exception:  # noqa: BLE001
+        logger.exception("历史脚本插件迁移失败（不影响启动）")
     await start_scheduler()
     # 从 run_agent_result 恢复 Master 重启前未收尾的执行现场
     try:

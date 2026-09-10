@@ -1,7 +1,8 @@
-"""JMeter 插件管理：启动扫描已装插件 + 运行期按需下载（免改镜像）。
+"""JMeter 插件管理：启动扫描 + sha256 计算 + 运行期 search_paths 注入。
 
 两个插件来源：
 - JMETER_HOME/lib/ext：镜像内置插件（JMeter 启动自动加载，无需 search_paths）
+  sha256 不计算内置 jar（由镜像负责，Master 也不下发）
 - plugin_dir（默认 work_dir/plugins）：Master 下发的第三方插件 jar 落在这里，
   运行 JMeter 时通过 -Jsearch_paths=<jar 路径> 注入类路径
 
@@ -10,11 +11,11 @@ JMeter NewDriver 的 search_paths 支持按 OS 路径分隔符分隔的文件/�
 """
 
 import asyncio
+import hashlib
 import shutil
 from pathlib import Path
 
 import httpx
-from loguru import logger
 
 
 def resolve_jmeter_home(jmeter_bin: str) -> Path | None:
@@ -26,48 +27,76 @@ def resolve_jmeter_home(jmeter_bin: str) -> Path | None:
     return p.parent if p.parent.name else None
 
 
-def scan_plugins(jmeter_bin: str, plugin_dir: str) -> list[str]:
-    """扫描 lib/ext + plugin_dir 下的 jar，返回已安装插件文件名（排序去重）。"""
-    names: set[str] = set()
+def scan_plugins(jmeter_bin: str, plugin_dir: str) -> list[dict]:
+    """扫描 lib/ext + plugin_dir 下的 jar，返回已安装插件清单（含 sha256）。
+
+    lib/ext 内置插件：只列文件名，不算 sha256（sha256="" 表示由镜像负责）
+    plugin_dir 下发插件：算 sha256 供 Master 比对内容指纹
+    """
+    names_seen: set[str] = set()
+    out: list[dict] = []
     home = resolve_jmeter_home(jmeter_bin)
     dirs: list[Path] = []
     if home is not None:
         dirs.append(home / "lib" / "ext")
     dirs.append(Path(plugin_dir))
     for d in dirs:
-        if d.is_dir():
-            for jar in d.glob("*.jar"):
-                names.add(jar.name)
-    return sorted(names)
+        if not d.is_dir():
+            continue
+        for jar in d.glob("*.jar"):
+            if jar.name in names_seen:
+                continue
+            names_seen.add(jar.name)
+            # 仅 plugin_dir 内的 jar 算 sha256（与 Master 下发逻辑对齐）
+            is_managed = d == Path(plugin_dir)
+            sha = _sha256(jar) if is_managed else ""
+            out.append(
+                {
+                    "name": jar.name,
+                    "sha256": sha,
+                    "size": jar.stat().st_size,
+                    "managed": is_managed,
+                }
+            )
+    return out
 
 
-async def ensure_plugins(required: list[dict], plugin_dir: str) -> list[str]:
-    """按需下载缺失插件到 plugin_dir，返回需注入 search_paths 的 jar 绝对路径。
+def scan_plugin_paths(plugin_dir: str) -> list[str]:
+    """扫描 plugin_dir 下的 jar，返回供 -Jsearch_paths 注入的绝对路径列表。
 
-    required: [{"filename": "x.jar", "url": "<presigned GET>"}]
-    已在 plugin_dir 的 jar 跳过下载（仍需加入 search_paths）；
-    镜像内置（lib/ext）插件 Master 不会下发，因此不在这里处理。
+    任务执行时调用：插件由 PluginSyncer 已对齐到位，本函数仅扫目录拼路径。
     """
-    target_dir = Path(plugin_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    search_paths: list[str] = []
-    for item in required:
-        filename = str(item.get("filename") or "")
-        url = str(item.get("url") or "")
-        if not filename.endswith(".jar") or not url:
-            raise RuntimeError(f"插件清单非法: {item}")
-        jar_path = target_dir / filename
-        if not jar_path.exists():
-            logger.info(f"下载插件 {filename}")
-            await asyncio.to_thread(_download, url, jar_path)
-        else:
-            logger.info(f"插件已存在，跳过下载: {filename}")
-        search_paths.append(str(jar_path))
-    return search_paths
+    d = Path(plugin_dir)
+    if not d.is_dir():
+        return []
+    return [str(jar.resolve()) for jar in d.glob("*.jar")]
+
+
+def _sha256(path: Path) -> str:
+    """计算文件 sha256（流式读，避免大 jar 占内存）。"""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1 << 16)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def compute_sha256(path: Path) -> str:
+    """_sha256 的公开别名，供 PluginSyncer 复用。"""
+    return _sha256(path)
+
+
+async def download_jar(url: str, dest: Path) -> None:
+    """流式下载 jar 到 dest（异步包装的阻塞实现）。"""
+    await asyncio.to_thread(_download, url, dest)
 
 
 def _download(url: str, dest: Path) -> None:
     """流式下载到本地（阻塞实现，调用方用 to_thread 包装）。"""
+    dest.parent.mkdir(parents=True, exist_ok=True)
     with httpx.Client(timeout=httpx.Timeout(600.0), follow_redirects=True) as client:
         with client.stream("GET", url) as resp:
             resp.raise_for_status()

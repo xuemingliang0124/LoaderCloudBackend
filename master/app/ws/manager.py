@@ -83,6 +83,12 @@ class AgentConnectionManager:
                 cpu_cores=int(data.get("cpu_cores", 0) or 0),
                 mem_total_gb=float(data.get("mem_total_gb", 0.0) or 0.0),
             )
+            # 心跳对账：Agent 上报 plugin_hashes，差异时推 sync/remove
+            plugin_hashes = data.get("plugin_hashes") or []
+            if plugin_hashes:
+                from app.services.plugin_sync import on_heartbeat
+
+                await on_heartbeat(agent_id, list(plugin_hashes))
         elif envelope.type == MSG_METRICS:
             await es_client.write_metrics({"agent_id": agent_id, **data})
             run_no = str(data.get("run_no", ""))
@@ -112,6 +118,11 @@ class AgentConnectionManager:
                 f"Agent[{agent_id}] 任务确认: {data.get('run_id')} "
                 f"accepted={data.get('accepted')}"
             )
+        elif envelope.type == "plugin_ack":
+            # Agent 上报当前 plugin_dir 实际清单，刷新 agent_plugin 表
+            from app.services.plugin_sync import on_plugin_ack
+
+            await on_plugin_ack(agent_id, data.get("plugins") or [])
         elif envelope.type == MSG_RESULT:
             from app.services.orchestrator import (
                 on_agent_result,

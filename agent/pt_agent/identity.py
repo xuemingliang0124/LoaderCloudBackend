@@ -3,12 +3,13 @@
 流程：启动探测到达 Master 的本机 IP → HTTP POST /api/v1/agents/register
 → Master 按 IP 查库：已存在返回原 agent_id，不存在则建号。Master 不可达时
 指数退避重试（与 WS 重连同策略），拿到 ID 前不进入后续流程。
+register 响应附 expected_plugins，Agent 据此对齐 plugin_dir。
 """
 
 import asyncio
 import platform
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 import httpx
@@ -22,6 +23,8 @@ class AgentIdentity:
     agent_id: str
     ip: str
     hostname: str
+    # Master 期望 Agent 安装的插件清单（含预签 URL），启动时对齐 plugin_dir 用
+    expected_plugins: list[dict] = field(default_factory=list)
 
 
 def detect_host_ip(master_ws_url: str) -> str:
@@ -48,7 +51,7 @@ def detect_host_ip(master_ws_url: str) -> str:
 
 async def resolve_identity(
     settings: AgentSettings,
-    plugins: list[str] | None = None,
+    plugins: list[dict] | None = None,
     cpu_cores: int = 0,
     mem_total_gb: float = 0.0,
 ) -> AgentIdentity:
@@ -58,6 +61,7 @@ async def resolve_identity(
 
     if settings.agent_id:
         # 手动指定 ID 时跳过注册（WS 握手的 upsert 会补建/刷新记录）
+        # expected_plugins 缺省为空，Agent 不会主动拉取（仅靠在线推送）
         logger.info(f"使用手动配置 agent_id={settings.agent_id} ip={ip}")
         return AgentIdentity(agent_id=settings.agent_id, ip=ip, hostname=hostname)
 
@@ -82,9 +86,15 @@ async def resolve_identity(
             data = body["data"]
             logger.info(
                 f"Agent 身份确认: id={data['agent_id']} ip={ip} "
-                f"hostname={hostname} is_new={data.get('is_new')}"
+                f"hostname={hostname} is_new={data.get('is_new')} "
+                f"expected_plugins={len(data.get('expected_plugins') or [])}"
             )
-            return AgentIdentity(agent_id=data["agent_id"], ip=ip, hostname=hostname)
+            return AgentIdentity(
+                agent_id=data["agent_id"],
+                ip=ip,
+                hostname=hostname,
+                expected_plugins=data.get("expected_plugins") or [],
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

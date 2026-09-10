@@ -9,6 +9,7 @@ from app.schemas import AgentOut, AgentRegisterIn, AgentRegisterOut
 from app.schemas.common import ok
 from app.services import agent_registry
 from app.services.exceptions import BusinessError
+from app.services.plugin_sync import expected_plugins_response
 
 router = APIRouter()
 
@@ -18,6 +19,8 @@ async def register_agent(payload: AgentRegisterIn) -> dict:
     """Agent 启动注册：按宿主机 IP 换取固定 agent_id（公开端点，Agent 无 JWT）。
 
     首次上报该 IP 时 Master 自动建号；后续启动返回同一 agent_id。
+    响应附 expected_plugins 清单（全局 enabled 插件 + 预签 URL），
+    Agent 据此 diff 下载对齐 plugin_dir。
     """
     if not payload.ip:
         raise BusinessError("Agent 宿主机 IP 为空，无法注册", code=3101)
@@ -30,12 +33,15 @@ async def register_agent(payload: AgentRegisterIn) -> dict:
         cpu_cores=payload.cpu_cores,
         mem_total_gb=payload.mem_total_gb,
     )
+    # 构造 expected_plugins：Agent 据此对齐 plugin_dir
+    expected = await expected_plugins_response()
     return ok(
         AgentRegisterOut(
             agent_id=node.agent_id,
             ip=node.ip,
             hostname=node.hostname,
             is_new=is_new,
+            expected_plugins=expected,
         ).model_dump()
     )
 

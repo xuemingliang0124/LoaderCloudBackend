@@ -1,7 +1,9 @@
 """WebSocket 端点：
 
 - /ws/agent：Agent 控制通道。注册信息通过握手查询参数携带
-  （agent_id/tags/ip/hostname/plugins/cpu_cores/mem_total_gb）。
+  （agent_id/tags/ip/hostname/cpu_cores/mem_total_gb）。
+  注：plugins 详细清单由 POST /api/v1/agents/register 端点接收，
+  WS 握手不再传 plugins（避免 query 参数塞 JSON，且 register 时已落库）
 - /ws/runs/{run_no}：前端实时通道（指标批次/状态推送），token 走 query 参数
   （浏览器 WS 不便设置 Authorization 头），替代轮询 ES。
 """
@@ -25,7 +27,6 @@ async def agent_endpoint(
     hostname: str = "",
     tags: str = "",
     jmeter_version: str = "",
-    plugins: str = "",
     cpu_cores: int = 0,
     mem_total_gb: float = 0.0,
 ) -> None:
@@ -36,7 +37,6 @@ async def agent_endpoint(
         hostname=hostname,
         tags=[t for t in tags.split(",") if t],
         jmeter_version=jmeter_version,
-        plugins=[p for p in plugins.split(",") if p],
         cpu_cores=cpu_cores,
         mem_total_gb=mem_total_gb,
     )

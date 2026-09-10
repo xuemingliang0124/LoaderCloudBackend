@@ -1,6 +1,7 @@
 """任务生命周期：下载 → 执行 → 上传 → 结果上报。
 
 实时指标（_metrics_loop）与终态汇总（_execute）均解析 JTL 产出真实数据。
+插件不再随任务下发：由 PluginSyncer 在启动/在线推送时对齐 plugin_dir。
 """
 
 import asyncio
@@ -12,7 +13,7 @@ from loguru import logger
 
 from pt_agent.config import get_settings
 from pt_agent.jtl_parser import parse_increment, parse_summary
-from pt_agent.plugins import ensure_plugins
+from pt_agent.plugins import scan_plugin_paths
 from pt_agent.protocol import MSG_METRICS, MSG_RESULT, Envelope
 from pt_agent.runner import JMeterRunner
 from pt_agent.state import AgentPhase, AgentState
@@ -71,10 +72,8 @@ class TaskExecutor:
             jtl_path = str(run_dir / f"{run_id}.jtl")
             report_dir = str(run_dir / "report")
 
-            # 第三方插件：缺失的下载到 plugin_dir，已装的返回 jar 路径供 search_paths
-            plugin_paths = await ensure_plugins(
-                data.get("plugins") or [], settings.plugin_dir_path
-            )
+            # 插件已由 PluginSyncer 对齐到位，直接扫 plugin_dir 拼 search_paths
+            plugin_paths = scan_plugin_paths(settings.plugin_dir_path)
 
             self._state.set(AgentPhase.RUNNING, run_id)
             await self._reporter.send_status(run_id, AgentPhase.RUNNING)
@@ -135,6 +134,13 @@ class TaskExecutor:
             )
         finally:
             self._state.set(AgentPhase.IDLE)
+            # 任务结束后清理延后删除的插件（PluginSyncer.remove 标记的 pending_remove）
+            syncer = getattr(self._reporter, "_plugin_syncer", None)
+            if syncer is not None:
+                try:
+                    await syncer.flush_pending_removes()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[{run_id}] 清理延后删除插件失败: {exc}")
 
     async def _prepare_files(self, run_id: str, files: list, run_dir: Path) -> str:
         """经 Master 预签名的 MinIO URL 下载任务文件，返回 JMX 本地路径。

@@ -1,8 +1,10 @@
 """模型汇总导出：迁移与建表依赖此处统一 import。"""
 
 from app.models.agent_node import AgentNode
+from app.models.agent_plugin import AgentPlugin
 from app.models.base import Base, IntPkMixin, TimestampMixin
 from app.models.enums import AgentPhase, AgentStatus, RunStatus, RunTrigger
+from app.models.plugin import JmeterPlugin
 from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
 from app.models.schedule import ScheduleJob
@@ -13,9 +15,11 @@ from app.models.user import User
 __all__ = [
     "AgentNode",
     "AgentPhase",
+    "AgentPlugin",
     "AgentStatus",
     "Base",
     "IntPkMixin",
+    "JmeterPlugin",
     "RunAgentResult",
     "RunStatus",
     "RunTrigger",

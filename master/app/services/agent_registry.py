@@ -9,7 +9,69 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.agent_node import AgentNode
+from app.models.agent_plugin import AgentPlugin
 from app.models.enums import AgentStatus
+from app.models.plugin import JmeterPlugin
+
+
+async def _sync_agent_plugin_records(
+    db: AsyncSession,
+    agent_id: str,
+    reported_plugins: list[dict] | None,
+) -> None:
+    """刷新 agent_plugin 表：Agent 上报的 plugins 与全局插件池对齐。
+
+    plugins 元素结构 [{name, sha256, size}]：
+    - 上报 sha 在 jmeter_plugin 表命中 → upsert installed
+    - 上报 sha 无对应全局插件 → 忽略（可能用户删了插件，Agent 还残留）
+    - 全局 enabled 但 Agent 没报 → 不在此处补装，由 PluginSyncer 推 install
+    """
+    if not reported_plugins:
+        return
+    reported_shas = {p.get("sha256", "") for p in reported_plugins if p.get("sha256")}
+    if not reported_shas:
+        return
+
+    # 查全局插件表：sha -> plugin_id
+    rows = (
+        (
+            await db.execute(
+                select(JmeterPlugin).where(JmeterPlugin.sha256.in_(reported_shas))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    sha_to_plugin_id = {r.sha256: r.id for r in rows}
+
+    # 查 Agent 既有记录
+    existing = (
+        (await db.execute(select(AgentPlugin).where(AgentPlugin.agent_id == agent_id)))
+        .scalars()
+        .all()
+    )
+    existing_by_plugin_id = {r.plugin_id: r for r in existing}
+
+    for p in reported_plugins:
+        sha = p.get("sha256", "")
+        plugin_id = sha_to_plugin_id.get(sha)
+        if not plugin_id:
+            continue
+        rec = existing_by_plugin_id.get(plugin_id)
+        if rec is None:
+            db.add(
+                AgentPlugin(
+                    agent_id=agent_id,
+                    plugin_id=plugin_id,
+                    installed_sha256=sha,
+                    status="installed",
+                )
+            )
+        else:
+            rec.installed_sha256 = sha
+            if rec.status == "pending_remove":
+                # 重新装回了，重置为 installed
+                rec.status = "installed"
 
 
 async def register_by_ip(
@@ -17,7 +79,7 @@ async def register_by_ip(
     hostname: str = "",
     tags: list[str] | None = None,
     jmeter_version: str = "",
-    plugins: list[str] | None = None,
+    plugins: list[dict] | None = None,
     cpu_cores: int = 0,
     mem_total_gb: float = 0.0,
 ) -> tuple[AgentNode, bool]:
@@ -25,6 +87,9 @@ async def register_by_ip(
 
     - IP 已存在：返回既有节点（agent_id 保持不变），顺带刷新 hostname/tags/版本/规格
     - IP 不存在：生成 agent-<uuid8> 新建节点（OFFLINE，WS 握手后转 ONLINE）
+
+    plugins 元素结构：[{name, sha256, size}]（Agent plugin_dir 实际清单，
+    本字段为快照冗余，权威数据在 agent_plugin 表）
 
     返回 (节点, is_new)。
     """
@@ -45,6 +110,7 @@ async def register_by_ip(
                 node.cpu_cores = cpu_cores
             if mem_total_gb:
                 node.mem_total_gb = mem_total_gb
+            await _sync_agent_plugin_records(db, node.agent_id, plugins)
             await db.commit()
             await db.refresh(node)
             return node, False
@@ -61,6 +127,8 @@ async def register_by_ip(
             status=AgentStatus.OFFLINE,
         )
         db.add(node)
+        await db.flush()  # 确保 agent_id 可用
+        await _sync_agent_plugin_records(db, node.agent_id, plugins)
         await db.commit()
         await db.refresh(node)
         return node, True
@@ -72,7 +140,7 @@ async def upsert_agent(
     hostname: str = "",
     tags: list[str] | None = None,
     jmeter_version: str = "",
-    plugins: list[str] | None = None,
+    plugins: list[dict] | None = None,
     cpu_cores: int = 0,
     mem_total_gb: float = 0.0,
 ) -> None:
@@ -111,6 +179,7 @@ async def upsert_agent(
                 node.mem_total_gb = mem_total_gb
             node.status = AgentStatus.ONLINE
             node.last_heartbeat = datetime.now()
+            await _sync_agent_plugin_records(db, agent_id, plugins)
         await db.commit()
 
 

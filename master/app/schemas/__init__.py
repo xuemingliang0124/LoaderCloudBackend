@@ -35,8 +35,9 @@ class AgentRegisterIn(BaseModel):
     hostname: str = ""
     tags: list[str] = []
     jmeter_version: str = ""
-    # 已安装插件 jar 文件名 + 压力机规格
-    plugins: list[str] = []
+    # 已安装插件清单：[{name, sha256, size}]（plugin_dir 实际扫描结果，
+    # lib/ext 内置的不算，由镜像负责）
+    plugins: list[dict] = []
     cpu_cores: int = 0
     mem_total_gb: float = 0.0
 
@@ -79,7 +80,6 @@ class ScriptOut(BaseModel):
     file_key: str
     data_files: list | None
     params: list | None
-    plugins: list | None
     description: str
 
 

@@ -93,25 +93,9 @@ async def create_run(
                 }
             )
 
-        # 插件依赖：Agent 已装的跳过；缺失的预签下载地址随任务下发，
-        # Agent 运行时装入 plugin_dir（免改镜像）
+        # 插件由 PluginSyncer 在 Agent 启动/在线推送时对齐 plugin_dir，
+        # 任务下发不再比对、不携带 plugins 字段
         nodes = await agent_registry.get_nodes(agent_ids)
-        required_plugins = script.plugins or []
-        agent_plugins: dict[str, list[dict]] = {}
-        for aid in agent_ids:
-            node = nodes.get(aid)
-            installed = set(node.plugins or []) if node else set()
-            missing = [
-                p for p in required_plugins if p.get("filename") not in installed
-            ]
-            agent_plugins[aid] = [
-                {"key": p["key"], "filename": p["filename"]} for p in missing
-            ]
-            if missing:
-                logger.info(
-                    f"run={run_no} agent={aid} 缺少插件 "
-                    f"{[p['filename'] for p in missing]}，将随任务下发运行时装入"
-                )
 
         # 线程按压力机规格（CPU 核数）拆分：total_threads>0 时各机 -Jthreads 不同
         agent_thread_args: dict[str, dict] = {}
@@ -147,16 +131,6 @@ async def create_run(
             }
             for aid in agent_ids
         }
-        # 预签缺失插件的下载 URL
-        agent_plugin_urls: dict[str, list[dict]] = {}
-        for aid, plugins in agent_plugins.items():
-            agent_plugin_urls[aid] = [
-                {
-                    "filename": p["filename"],
-                    "url": await storage.presigned_get(p["key"]),
-                }
-                for p in plugins
-            ]
         task_data = {
             "run_id": run_no,
             "files": files,
@@ -169,7 +143,6 @@ async def create_run(
         agent_ids,
         task_data,
         upload_urls,
-        agent_plugin_urls,
         agent_thread_args,
     )
     return {"run_no": run_no, "agent_ids": agent_ids}
@@ -180,11 +153,12 @@ async def dispatch(
     agent_ids: list[str],
     task_data: dict,
     upload_urls: dict,
-    agent_plugins: dict | None = None,
     agent_args: dict | None = None,
 ) -> None:
-    """向选中 Agent 下发任务（每 Agent 嵌入自己的上传目标/插件/线程参数）。"""
-    agent_plugins = agent_plugins or {}
+    """向选中 Agent 下发任务（每 Agent 嵌入自己的上传目标/线程参数）。
+
+    插件不再随任务下发：由 PluginSyncer 在 Agent 启动/在线推送时对齐 plugin_dir。
+    """
     agent_args = agent_args or {}
     sent = []
     for aid in agent_ids:
@@ -194,7 +168,6 @@ async def dispatch(
                 **task_data.get("jmeter_args", {}),
                 **agent_args.get(aid, {}),
             },
-            "plugins": agent_plugins.get(aid, []),
             "upload": upload_urls.get(aid, {}),
         }
         message = Envelope.now(MSG_TASK, payload).model_dump()

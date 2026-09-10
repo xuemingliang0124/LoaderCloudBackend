@@ -79,3 +79,20 @@ async def presigned_put(object_key: str, expires_hours: int = 6) -> str:
     return await get_presign_client().presigned_put_object(
         get_settings().minio_bucket, object_key, expires=timedelta(hours=expires_hours)
     )
+
+
+async def get_object_bytes(object_key: str) -> bytes:
+    """读取 MinIO 对象为 bytes（用于插件迁移时算 sha256 等小文件场景）。
+
+    流式读避免大对象占用内存，方法返回完整 bytes。
+    """
+    response = await get_minio().get_object(get_settings().minio_bucket, object_key)
+    try:
+        chunks = []
+        async for chunk in response:
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        # miniopy_async 的 response 需显式 release
+        if hasattr(response, "release"):
+            await response.release()

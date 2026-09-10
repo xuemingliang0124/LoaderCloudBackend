@@ -13,6 +13,8 @@ from pt_agent.protocol import (
     MSG_HEARTBEAT,
     MSG_PING,
     MSG_PONG,
+    MSG_PLUGIN_REMOVE,
+    MSG_PLUGIN_SYNC,
     MSG_REGISTER,
     MSG_STATUS,
     MSG_STOP,
@@ -30,7 +32,6 @@ class Reporter:
         state: AgentState,
         ip: str = "",
         hostname: str = "",
-        plugins: list[str] | None = None,
         cpu_cores: int = 0,
         mem_total_gb: float = 0.0,
     ) -> None:
@@ -38,19 +39,26 @@ class Reporter:
         self._state = state
         self._ip = ip
         self._hostname = hostname
-        self._plugins = plugins or []
         self._cpu_cores = cpu_cores
         self._mem_total_gb = mem_total_gb
         self._executor = None  # 延迟绑定（main 装配），避免与 executor 循环依赖
+        self._plugin_syncer = None  # 延迟绑定，避免循环依赖
         self._ws = None
         self._connected = asyncio.Event()
 
     def bind_executor(self, executor) -> None:
         self._executor = executor
 
+    def bind_plugin_syncer(self, syncer) -> None:
+        self._plugin_syncer = syncer
+
     @property
     def connected(self) -> bool:
         return self._connected.is_set()
+
+    def is_busy(self) -> bool:
+        """Agent 是否在执行任务（PluginSyncer 决定插件 remove 是否延后）。"""
+        return self._executor is not None and self._executor.busy
 
     async def send(self, envelope: Envelope) -> bool:
         if not self.connected or self._ws is None:
@@ -84,13 +92,13 @@ class Reporter:
     async def run_forever(self) -> None:
         """主循环：连接 → 注册 → 收消息；断线指数退避重连。"""
         settings = self._settings
+        # 注：WS 握手不再传 plugins（由 register HTTP 端点负责落库详细清单）
         query = urlencode(
             {
                 "agent_id": settings.resolved_agent_id,
                 "tags": ",".join(settings.tag_list),
                 "ip": self._ip,
                 "hostname": self._hostname,
-                "plugins": ",".join(self._plugins),
                 "cpu_cores": str(self._cpu_cores),
                 "mem_total_gb": str(self._mem_total_gb),
             }
@@ -124,13 +132,23 @@ class Reporter:
             delay = min(delay * 2, settings.reconnect_delay_max)
 
     async def _heartbeat_loop(self) -> None:
-        """周期上报心跳：资源快照 + 状态。"""
+        """周期上报心跳：资源快照 + 状态 + plugin_dir 哈希集合。
+
+        plugin_hashes 用于 Master 心跳对账纠偏（详见 plugin_sync.on_heartbeat）。
+        """
         while True:
             await asyncio.sleep(self._settings.heartbeat_interval)
             if not self.connected:
                 continue
             data = snapshot()
             data.update(self._state.to_payload())
+            # 上报 plugin_dir 实际 sha256 集合（lib/ext 内置的不算）
+            if self._plugin_syncer is not None:
+                data["plugin_hashes"] = [
+                    p["sha256"]
+                    for p in self._plugin_syncer.snapshot()
+                    if p.get("sha256")
+                ]
             await self.send(Envelope.now(MSG_HEARTBEAT, data))
 
     async def _receive_loop(self, ws) -> None:
@@ -150,5 +168,19 @@ class Reporter:
             elif envelope.type == MSG_STOP:
                 assert self._executor is not None, "executor 未绑定"
                 await self._executor.stop(str(envelope.data.get("run_id", "")))
+            elif envelope.type == MSG_PLUGIN_SYNC:
+                # 后台异步执行，不阻塞 WS 接收循环
+                data = envelope.data
+                if self._plugin_syncer is not None and data.get("action") == "install":
+                    asyncio.create_task(
+                        self._plugin_syncer.install(data.get("plugins") or [])
+                    )
+            elif envelope.type == MSG_PLUGIN_REMOVE:
+                if self._plugin_syncer is not None:
+                    asyncio.create_task(
+                        self._plugin_syncer.remove(
+                            envelope.data.get("sha256_list") or []
+                        )
+                    )
             else:
                 logger.debug(f"忽略 Master 消息: {envelope.type}")
