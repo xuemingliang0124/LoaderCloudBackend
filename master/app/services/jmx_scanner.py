@@ -68,6 +68,52 @@ class JmxScanResult:
     thread_groups: list[ThreadGroupInfo]
 
 
+@dataclass
+class ThreadGroupDiff:
+    """两份 JMX 的启用线程组差异（按名称+类型比对，不含线程数等参数值）。
+
+    场景设置按线程组名称落库，因此替换 JMX 时线程组标识必须保持一致；
+    线程数/rampUp/循环/持续时间等参数允许不同（执行时由场景设置覆盖）。
+    """
+
+    added: list[str]  # 新文件相对旧文件多出的线程组名
+    removed: list[str]  # 新文件相对旧文件缺失的线程组名
+    # 同名但 testclass 不同：[{"name", "old_type", "new_type"}]
+    type_changed: list[dict[str, str]]
+
+    @property
+    def is_consistent(self) -> bool:
+        return not (self.added or self.removed or self.type_changed)
+
+    def describe(self) -> str:
+        parts: list[str] = []
+        if self.removed:
+            parts.append(f"缺失线程组: {', '.join(self.removed)}")
+        if self.added:
+            parts.append(f"新增线程组: {', '.join(self.added)}")
+        for c in self.type_changed:
+            parts.append(
+                f"线程组 {c['name']} 类型由 {c['old_type']} 变为 {c['new_type']}"
+            )
+        return "；".join(parts)
+
+
+def compare_thread_groups(
+    old_groups: list[ThreadGroupInfo], new_groups: list[ThreadGroupInfo]
+) -> ThreadGroupDiff:
+    """比对两份扫描结果的线程组标识（名称 → testclass）是否一致。"""
+    old_map = {g.name: g.testclass for g in old_groups}
+    new_map = {g.name: g.testclass for g in new_groups}
+    removed = [name for name in old_map if name not in new_map]
+    added = [name for name in new_map if name not in old_map]
+    type_changed = [
+        {"name": name, "old_type": old_map[name], "new_type": new_map[name]}
+        for name in old_map
+        if name in new_map and old_map[name] != new_map[name]
+    ]
+    return ThreadGroupDiff(added=added, removed=removed, type_changed=type_changed)
+
+
 def _is_enabled(node: ET.Element) -> bool:
     """判断节点是否启用：enabled 属性缺省为 true（JMeter 未显式标注即启用）。"""
     return node.get("enabled", "true").lower() != "false"

@@ -15,6 +15,7 @@ from datetime import datetime
 
 from loguru import logger
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
@@ -22,7 +23,8 @@ from app.models.enums import RunStatus, RunTrigger
 from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
 from app.models.scenario import Scenario
-from app.models.script import Script
+from app.models.scenario_script import ScenarioScript
+from app.models.scenario_script_tg import ScenarioScriptTG
 from app.services import agent_registry, es_client, storage
 from app.services.exceptions import BusinessError
 from app.ws.hub import frontend_hub
@@ -42,17 +44,60 @@ async def create_run(
     agent_ids: list[str] | None = None,
     created_by: str = "",
 ) -> dict:
-    """创建执行记录并下发任务，返回 run_no 与实际选中的 Agent。"""
+    """创建执行记录并逐脚本下发任务，返回 run_no 与实际选中的 Agent 并集。
+
+    每个脚本按自身 agent_tags/agent_count 独立选机；外部传入 agent_ids 时
+    所有脚本共用该集合。线程按脚本内各线程组在脚本的 Agent 集合内按 CPU 拆分。
+    """
     async with SessionLocal() as db:
         scenario = await db.get(Scenario, scenario_id)
         if scenario is None:
             raise BusinessError("场景不存在", code=2001)
-        if not agent_ids:
-            agent_ids = await agent_registry.select_agents(
-                scenario.agent_tags or [], scenario.agent_count
+
+        # 加载脚本（含脚本元数据）与各线程组设置
+        scenario = (
+            await db.execute(
+                select(Scenario)
+                .options(
+                    selectinload(Scenario.scripts).selectinload(ScenarioScript.script)
+                )
+                .options(
+                    selectinload(Scenario.scripts).selectinload(
+                        ScenarioScript.thread_groups
+                    )
+                )
+                .where(Scenario.id == scenario_id)
             )
-        if not agent_ids:
+        ).scalar_one()
+        if not scenario.scripts:
+            raise BusinessError("场景未关联任何脚本", code=2005)
+
+        # 按脚本选机：外部指定 agent_ids 时所有脚本共用，否则每脚本独立选
+        script_agents: dict[int, list[str]] = {}
+        all_agent_ids: list[str] = []
+        if agent_ids:
+            for ss in scenario.scripts:
+                script_agents[ss.id] = agent_ids
+            all_agent_ids = list(agent_ids)
+        else:
+            for ss in scenario.scripts:
+                aids = await agent_registry.select_agents(
+                    ss.agent_tags or [], ss.agent_count
+                )
+                if not aids:
+                    name = (
+                        ss.script.name if ss.script is not None else str(ss.script_id)
+                    )
+                    raise BusinessError(f"脚本 {name} 无可用压力机", code=2002)
+                script_agents[ss.id] = aids
+                for aid in aids:
+                    if aid not in all_agent_ids:
+                        all_agent_ids.append(aid)
+        if not all_agent_ids:
             raise BusinessError("无可用压力机，请先上线 Agent", code=2002)
+
+        # 预期结果数 = 所有 (脚本, Agent) 下发对
+        expected_results = sum(len(aids) for aids in script_agents.values())
 
         run_no = f"r{time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
         db.add(
@@ -61,59 +106,19 @@ async def create_run(
                 scenario_id=scenario_id,
                 status=RunStatus.PENDING,
                 trigger=trigger,
-                agent_ids=agent_ids,
+                agent_ids=all_agent_ids,
+                expected_results=expected_results,
                 created_by=created_by,
             )
         )
         await db.commit()
 
-        script = await db.get(Script, scenario.script_id)
-        if script is None or not script.file_key:
-            raise BusinessError("场景关联脚本不存在或缺少脚本文件", code=2005)
+        # 场景级 JVM 参数覆盖（对所有脚本生效）
+        base_args: dict[str, str] = {
+            str(k): str(v) for k, v in (scenario.param_overrides or {}).items()
+        }
 
-        jmeter_args = {**(scenario.param_overrides or {})}
-        if scenario.duration:
-            jmeter_args["duration"] = str(scenario.duration)
-
-        # 文件下载清单：Master 预签 GET URL，Agent 直连 MinIO 下载
-        # 先放 JMX 脚本，再追加 JMX 引用的数据文件（CSV 等），save_as 用上传时的原始文件名
-        files = [
-            {
-                "key": script.file_key,
-                "save_as": script.file_key.rsplit("/", 1)[-1],
-                "url": await storage.presigned_get(script.file_key),
-            }
-        ]
-        for df in script.data_files or []:
-            files.append(
-                {
-                    "key": df["key"],
-                    "save_as": df["filename"],
-                    "url": await storage.presigned_get(df["key"]),
-                }
-            )
-
-        # 插件由 PluginSyncer 在 Agent 启动/在线推送时对齐 plugin_dir，
-        # 任务下发不再比对、不携带 plugins 字段
-        nodes = await agent_registry.get_nodes(agent_ids)
-
-        # 线程按压力机规格（CPU 核数）拆分：total_threads>0 时各机 -Jthreads 不同
-        agent_thread_args: dict[str, dict] = {}
-        if scenario.total_threads and len(agent_ids) > 1:
-            if scenario.total_threads < len(agent_ids):
-                logger.warning(
-                    f"run={run_no} 总线程数 {scenario.total_threads} 少于 "
-                    f"Agent 数 {len(agent_ids)}，部分 Agent 将分到 0 线程"
-                )
-            weights = {
-                aid: max(1, (nodes[aid].cpu_cores or 0)) if aid in nodes else 1
-                for aid in agent_ids
-            }
-            shares = split_threads(scenario.total_threads, weights)
-            agent_thread_args = {aid: {"threads": str(n)} for aid, n in shares.items()}
-            logger.info(f"run={run_no} 线程按规格拆分: {shares}")
-
-        # 各 Agent 产物上传目标（预签 PUT URL 按 agent 独立签发，路径含 agent_id）
+        # 各 Agent 产物上传目标（预签 PUT URL 按 agent 独立签发）
         upload_urls = {
             aid: {
                 "jtl": {
@@ -129,23 +134,75 @@ async def create_run(
                     ),
                 },
             }
-            for aid in agent_ids
-        }
-        task_data = {
-            "run_id": run_no,
-            "files": files,
-            "jmeter_args": jmeter_args,
-            "start_at": int(time.time()) + 5,
+            for aid in all_agent_ids
         }
 
-    await dispatch(
-        run_no,
-        agent_ids,
-        task_data,
-        upload_urls,
-        agent_thread_args,
-    )
-    return {"run_no": run_no, "agent_ids": agent_ids}
+    # 逐脚本构造任务并下发（插件由 PluginSyncer 对齐，不随任务下发）
+    start_at = int(time.time()) + 5
+    for ss in scenario.scripts:
+        aids = script_agents[ss.id]
+        script = ss.script
+        if script is None or not script.file_key:
+            raise BusinessError(
+                f"场景关联脚本不存在或缺少脚本文件: script_id={ss.script_id}",
+                code=2005,
+            )
+        # 本脚本文件清单
+        files: list[dict] = [
+            {
+                "key": script.file_key,
+                "save_as": script.file_key.rsplit("/", 1)[-1],
+                "url": await storage.presigned_get(script.file_key),
+            }
+        ]
+        for df in script.data_files or []:
+            files.append(
+                {
+                    "key": df["key"],
+                    "save_as": df["filename"],
+                    "url": await storage.presigned_get(df["key"]),
+                }
+            )
+        # 本脚本线程组设置 → -J 参数（key 加线程组名后缀）
+        jmeter_args = dict(base_args)
+        tg_settings: list[ScenarioScriptTG] = []
+        for tg in ss.thread_groups:
+            tg_settings.append(tg)
+            jmeter_args[f"threads_{tg.thread_group_name}"] = str(tg.num_threads)
+            jmeter_args[f"ramp_up_{tg.thread_group_name}"] = str(tg.ramp_time)
+            jmeter_args[f"loops_{tg.thread_group_name}"] = str(tg.loops)
+            if tg.scheduler:
+                jmeter_args[f"duration_{tg.thread_group_name}"] = str(tg.duration)
+
+        # 线程按本脚本 Agent 集合的 CPU 核数拆分
+        nodes = await agent_registry.get_nodes(aids)
+        agent_thread_args: dict[str, dict] = {aid: {} for aid in aids}
+        if len(aids) > 1:
+            weights = {
+                aid: max(1, (nodes[aid].cpu_cores or 0)) if aid in nodes else 1
+                for aid in aids
+            }
+            for tg in tg_settings:
+                if tg.num_threads <= 0:
+                    continue
+                shares = split_threads(tg.num_threads, weights)
+                for aid, n in shares.items():
+                    agent_thread_args[aid][f"threads_{tg.thread_group_name}"] = str(n)
+            logger.info(
+                f"run={run_no} script={ss.script_id} 线程拆分: "
+                f"{ {tg.thread_group_name: tg.num_threads for tg in tg_settings} }"
+            )
+
+        task_data = {
+            "run_id": run_no,
+            "scenario_script_id": ss.id,
+            "files": files,
+            "jmeter_args": jmeter_args,
+            "start_at": start_at,
+        }
+        await dispatch(run_no, aids, task_data, upload_urls, agent_thread_args)
+
+    return {"run_no": run_no, "agent_ids": all_agent_ids}
 
 
 async def dispatch(
@@ -314,9 +371,17 @@ def _merge_summaries(summaries: list[dict]) -> dict:
 
 
 async def on_agent_result(
-    run_no: str, agent_id: str, summary: dict, artifacts: list
+    run_no: str,
+    agent_id: str,
+    summary: dict,
+    artifacts: list,
+    scenario_script_id: int | None = None,
 ) -> None:
-    """汇聚各 Agent 结果：落 run_agent_result 表；收齐后合并写 ES 汇总并置终态。"""
+    """汇聚各 Agent 结果：落 run_agent_result 表；收齐后合并写 ES 汇总并置终态。
+
+    同一 Agent 可执行场景内多个脚本，以 (run_no, agent_id, scenario_script_id)
+    区分；缺失 scenario_script_id 时按 (run_no, agent_id) 单条处理（兼容旧 Agent）。
+    """
     failed = bool(summary.get("failed"))
     async with SessionLocal() as db:
         run = (
@@ -333,21 +398,17 @@ async def on_agent_result(
                 f"agent={agent_id} status={run.status.value}"
             )
             return
-        agent_ids = list(run.agent_ids or [])
         stopping = run.status == RunStatus.STOPPING
+        expected = run.expected_results or len(run.agent_ids or [])
 
-        existing = (
-            (
-                await db.execute(
-                    select(RunAgentResult).where(
-                        RunAgentResult.run_no == run_no,
-                        RunAgentResult.agent_id == agent_id,
-                    )
-                )
-            )
-            .scalars()
-            .first()
+        # 按 (run_no, agent_id, scenario_script_id) 查找已有记录
+        stmt = select(RunAgentResult).where(
+            RunAgentResult.run_no == run_no,
+            RunAgentResult.agent_id == agent_id,
         )
+        if scenario_script_id is not None:
+            stmt = stmt.where(RunAgentResult.scenario_script_id == scenario_script_id)
+        existing = (await db.execute(stmt)).scalars().first()
         if existing is not None:
             existing.summary = summary
             existing.artifacts = artifacts
@@ -357,6 +418,7 @@ async def on_agent_result(
                 RunAgentResult(
                     run_no=run_no,
                     agent_id=agent_id,
+                    scenario_script_id=scenario_script_id,
                     summary=summary,
                     artifacts=artifacts,
                     failed=failed,
@@ -365,10 +427,10 @@ async def on_agent_result(
         await db.commit()
 
     logger.info(f"run={run_no} 收到 {agent_id} 结果（failed={failed}）")
-    await _maybe_finalize(run_no, agent_ids, stopping)
+    await _maybe_finalize(run_no, expected, stopping)
 
 
-async def _maybe_finalize(run_no: str, agent_ids: list[str], stopping: bool) -> None:
+async def _maybe_finalize(run_no: str, expected: int, stopping: bool) -> None:
     """结果收齐后合并写 ES 汇总并置终态；条件更新保证并发回报只收尾一次。"""
     async with SessionLocal() as db:
         rows = list(
@@ -380,8 +442,8 @@ async def _maybe_finalize(run_no: str, agent_ids: list[str], stopping: bool) -> 
             .scalars()
             .all()
         )
-        if agent_ids and len(rows) < len(agent_ids):
-            logger.info(f"run={run_no} 结果汇聚 {len(rows)}/{len(agent_ids)}，继续等待")
+        if expected and len(rows) < expected:
+            logger.info(f"run={run_no} 结果汇聚 {len(rows)}/{expected}，继续等待")
             return
 
         final_status = (
@@ -436,7 +498,7 @@ def _cancel_stop_watchdog(run_no: str) -> None:
 
 
 async def _stop_watchdog(run_no: str, timeout: int) -> None:
-    """停止看门狗：超时未回报的 Agent 记失败占位，强制收尾 STOPPED。
+    """停止看门狗：超时未回报的 (Agent, 脚本) 记失败占位，强制收尾 STOPPED。
 
     覆盖 Agent 离线/重启丢消息等异常，避免 run 永远停在 STOPPING。
     """
@@ -449,6 +511,7 @@ async def _stop_watchdog(run_no: str, timeout: int) -> None:
         )
         if run is None or run.status != RunStatus.STOPPING:
             return
+        expected = run.expected_results or len(run.agent_ids or [])
         agent_ids = list(run.agent_ids or [])
         rows = list(
             (
@@ -459,15 +522,19 @@ async def _stop_watchdog(run_no: str, timeout: int) -> None:
             .scalars()
             .all()
         )
-        reported = {r.agent_id for r in rows}
-        for aid in agent_ids:
-            if aid in reported:
-                continue
-            logger.warning(f"run={run_no} agent={aid} 停止超时未回报，记为失败")
+        # 补齐缺失的结果位（无法精确还原 (Agent, 脚本) 分配，用 scenario_script_id=NULL
+        # 占位；MySQL 唯一约束允许多个 NULL，不会冲突）
+        missing = expected - len(rows)
+        for i in range(missing):
+            aid = agent_ids[i % len(agent_ids)] if agent_ids else "unknown"
+            logger.warning(
+                f"run={run_no} agent={aid} 停止超时未回报，记为失败（{i + 1}/{missing}）"
+            )
             db.add(
                 RunAgentResult(
                     run_no=run_no,
                     agent_id=aid,
+                    scenario_script_id=None,
                     summary={
                         "failed": True,
                         "message": "停止超时未回报（Agent 可能离线）",
@@ -477,7 +544,7 @@ async def _stop_watchdog(run_no: str, timeout: int) -> None:
                 )
             )
         await db.commit()
-    await _maybe_finalize(run_no, agent_ids, stopping=True)
+    await _maybe_finalize(run_no, expected, stopping=True)
 
 
 async def recover_active_runs() -> None:
@@ -498,9 +565,12 @@ async def recover_active_runs() -> None:
             .scalars()
             .all()
         )
-        pending = [(r.run_no, r.status, list(r.agent_ids or [])) for r in runs]
+        pending = [
+            (r.run_no, r.status, r.expected_results or len(r.agent_ids or []))
+            for r in runs
+        ]
 
-    for run_no, status, agent_ids in pending:
+    for run_no, status, expected in pending:
         if status == RunStatus.PENDING:
             logger.warning(f"run={run_no} 重启时仍为 PENDING（未完成下发），置 FAILED")
             await _mark_run_failed(run_no, "Master 重启，任务未完成下发")
@@ -515,10 +585,10 @@ async def recover_active_runs() -> None:
                 .scalars()
                 .all()
             )
-        if agent_ids and len(rows) >= len(agent_ids):
+        if expected and len(rows) >= expected:
             logger.info(f"run={run_no} 重启前结果已收齐，直接收尾")
             await _maybe_finalize(
-                run_no, agent_ids, stopping=status == RunStatus.STOPPING
+                run_no, expected, stopping=status == RunStatus.STOPPING
             )
         elif status == RunStatus.STOPPING:
             logger.warning(f"run={run_no} 重启时停止中且结果未齐，布防看门狗兜底")
@@ -526,7 +596,7 @@ async def recover_active_runs() -> None:
         else:
             logger.info(
                 f"run={run_no} 重启恢复：等待 Agent 重连后续报结果 "
-                f"（{len(rows)}/{len(agent_ids)}）"
+                f"（{len(rows)}/{expected}）"
             )
 
 

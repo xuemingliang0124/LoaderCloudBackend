@@ -133,6 +133,7 @@ class AgentConnectionManager:
                 agent_id=agent_id,
                 summary=data.get("summary", {}),
                 artifacts=data.get("artifacts", []),
+                scenario_script_id=data.get("scenario_script_id"),
             )
         else:
             logger.debug(f"忽略 {agent_id} 的未知消息类型: {envelope.type}")

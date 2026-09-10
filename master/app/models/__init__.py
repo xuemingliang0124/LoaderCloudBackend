@@ -9,6 +9,8 @@ from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
 from app.models.schedule import ScheduleJob
 from app.models.scenario import Scenario
+from app.models.scenario_script import ScenarioScript
+from app.models.scenario_script_tg import ScenarioScriptTG
 from app.models.script import Script
 from app.models.user import User
 
@@ -25,6 +27,8 @@ __all__ = [
     "RunTrigger",
     "Scenario",
     "ScenarioRun",
+    "ScenarioScript",
+    "ScenarioScriptTG",
     "ScheduleJob",
     "Script",
     "TimestampMixin",

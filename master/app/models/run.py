@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum as SAEnum, ForeignKey, String
+from sqlalchemy import JSON, DateTime, Enum as SAEnum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IntPkMixin, TimestampMixin
@@ -23,8 +23,10 @@ class ScenarioRun(Base, IntPkMixin, TimestampMixin):
     trigger: Mapped[RunTrigger] = mapped_column(
         SAEnum(RunTrigger, length=16), default=RunTrigger.MANUAL
     )
-    # 下发时的 Agent 列表快照
+    # 下发时的 Agent 列表快照（所有脚本选中 Agent 的并集）
     agent_ids: Mapped[list | None] = mapped_column(JSON, default=list)
+    # 预期结果数：场景内 (脚本, Agent) 下发对数，收齐后置终态
+    expected_results: Mapped[int] = mapped_column(Integer, default=0)
     start_time: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     end_time: Mapped[datetime | None] = mapped_column(DateTime, default=None)
     error_message: Mapped[str] = mapped_column(String(1024), default="")

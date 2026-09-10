@@ -3,7 +3,12 @@
 import pytest
 
 from app.services.exceptions import BusinessError
-from app.services.jmx_scanner import JmxScanResult, ThreadGroupInfo, scan_jmx
+from app.services.jmx_scanner import (
+    JmxScanResult,
+    ThreadGroupInfo,
+    compare_thread_groups,
+    scan_jmx,
+)
 
 # ---------- 测试用 JMX 片段 ----------
 
@@ -459,3 +464,70 @@ def test_disabled_arguments_skipped() -> None:
     groups = scan_jmx(_JMX_DISABLED_VARS.encode()).thread_groups
     assert len(groups) == 1
     assert groups[0].num_threads == 0  # ${threads} 的定义被禁用，无法解析
+
+
+# ---------- 线程组一致性比对用例 ----------
+
+
+def _tg(name: str, testclass: str = "ThreadGroup") -> ThreadGroupInfo:
+    return ThreadGroupInfo(
+        name=name,
+        testclass=testclass,
+        num_threads=1,
+        ramp_time=0,
+        loops=1,
+        scheduler=False,
+        duration=0,
+    )
+
+
+def test_compare_identical_groups() -> None:
+    """名称/类型相同（参数值不同也算一致，参数由场景覆盖）。"""
+    old = [_tg("A"), _tg("B")]
+    new = [
+        ThreadGroupInfo("A", "ThreadGroup", 99, 10, 5, True, 300),
+        _tg("B"),
+    ]
+    diff = compare_thread_groups(old, new)
+    assert diff.is_consistent is True
+    assert diff.added == []
+    assert diff.removed == []
+    assert diff.type_changed == []
+
+
+def test_compare_detects_added_and_removed() -> None:
+    """新文件多出/缺失线程组被识别。"""
+    diff = compare_thread_groups([_tg("A"), _tg("B")], [_tg("B"), _tg("C")])
+    assert diff.is_consistent is False
+    assert diff.added == ["C"]
+    assert diff.removed == ["A"]
+    assert "新增线程组" in diff.describe()
+    assert "缺失线程组" in diff.describe()
+
+
+def test_compare_detects_type_change() -> None:
+    """同名但线程组类型变化（ThreadGroup→SetUpThreadGroup）判为不一致。"""
+    diff = compare_thread_groups(
+        [_tg("A", "ThreadGroup")], [_tg("A", "SetUpThreadGroup")]
+    )
+    assert diff.is_consistent is False
+    assert diff.type_changed == [
+        {"name": "A", "old_type": "ThreadGroup", "new_type": "SetUpThreadGroup"}
+    ]
+    assert "类型由" in diff.describe()
+
+
+def test_compare_empty_groups() -> None:
+    """两份无线程组的文件视为一致。"""
+    diff = compare_thread_groups([], [])
+    assert diff.is_consistent is True
+
+
+def test_compare_via_scanned_jmx() -> None:
+    """端到端：扫描两份线程组名称不同的 JMX，比对应判为不一致。"""
+    old = scan_jmx(_JMX_STANDARD.encode()).thread_groups  # 用户登录
+    new = scan_jmx(_JMX_DURATION.encode()).thread_groups  # 持续加压
+    diff = compare_thread_groups(old, new)
+    assert diff.is_consistent is False
+    assert diff.removed == ["用户登录"]
+    assert diff.added == ["持续加压"]

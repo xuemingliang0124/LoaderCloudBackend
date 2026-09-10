@@ -57,6 +57,7 @@ class TaskExecutor:
 
     async def _execute(self, data: dict) -> None:
         run_id = str(data["run_id"])
+        scenario_script_id = data.get("scenario_script_id")
         settings = get_settings()
         jmeter_args = {
             str(k): str(v) for k, v in (data.get("jmeter_args") or {}).items()
@@ -112,7 +113,12 @@ class TaskExecutor:
             await self._reporter.send(
                 Envelope.now(
                     MSG_RESULT,
-                    {"run_id": run_id, "summary": summary, "artifacts": artifacts},
+                    {
+                        "run_id": run_id,
+                        "scenario_script_id": scenario_script_id,
+                        "summary": summary,
+                        "artifacts": artifacts,
+                    },
                 )
             )
         except asyncio.CancelledError:
@@ -127,6 +133,7 @@ class TaskExecutor:
                     MSG_RESULT,
                     {
                         "run_id": run_id,
+                        "scenario_script_id": scenario_script_id,
                         "summary": {"failed": True, "message": str(exc)},
                         "artifacts": [],
                     },

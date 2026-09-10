@@ -113,6 +113,111 @@ async def list_scripts(
     return ok([ScriptOut.model_validate(r).model_dump(mode="json") for r in rows])
 
 
+@router.put("/scripts/{script_id}/jmx")
+async def replace_script_jmx(
+    script_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> dict:
+    """上传新 JMX 替换脚本文件。
+
+    上传前比对新旧文件的启用线程组（名称 + 类型），必须完全一致才允许替换，
+    否则返回失败并给出差异明细（场景线程组设置按名称落库，标识变化会导致
+    设置失效）。线程数/rampUp/循环/持续时间等参数允许不同，执行时由场景设置覆盖。
+    替换在原 MinIO 对象上覆盖，file_key、数据文件与场景关联均不变。
+    """
+    filename = file.filename or ""
+    if not filename.lower().endswith(".jmx"):
+        raise BusinessError("仅支持上传 .jmx 文件", code=3001)
+
+    script = (
+        await db.execute(select(Script).where(Script.id == script_id))
+    ).scalar_one_or_none()
+    if script is None:
+        raise BusinessError("脚本不存在", code=3007)
+    if not script.file_key:
+        raise BusinessError("原脚本缺少 JMX 文件，无法替换", code=3008)
+
+    new_bytes = await file.read()
+    # fail-fast：先解析新文件，非法 XML 直接拒绝（scan_jmx 抛 BusinessError 3005）
+    new_groups = jmx_scanner.scan_jmx(new_bytes).thread_groups
+
+    old_bytes = await storage.get_object_bytes(script.file_key)
+    old_groups = jmx_scanner.scan_jmx(old_bytes).thread_groups
+
+    diff = jmx_scanner.compare_thread_groups(old_groups, new_groups)
+    if not diff.is_consistent:
+        raise BusinessError(
+            f"新脚本与原脚本线程组不一致，拒绝替换：{diff.describe()}", code=3009
+        )
+
+    # 线程组一致：覆盖原对象（路径不变，数据文件/场景关联不受影响）
+    await storage.upload_bytes(script.file_key, new_bytes, content_type="text/xml")
+    return ok(ScriptOut.model_validate(script).model_dump(mode="json"))
+
+
+@router.delete("/scripts/{script_id}")
+async def delete_script(
+    script_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> dict:
+    """删除脚本：校验场景引用 → 删 jmeter_script → 清理 MinIO 的 JMX 与参数文件。
+
+    scenario_script.script_id 外键没有 cascade，被场景引用时拒绝删除，
+    需先在场景中移除该脚本（否则直接删会触发外键 1451）。
+    MinIO 对象在删库后清理，失败仅告警不阻断，残留对象由运维定期清理。
+    """
+    script = (
+        await db.execute(select(Script).where(Script.id == script_id))
+    ).scalar_one_or_none()
+    if script is None:
+        raise BusinessError("脚本不存在", code=3007)
+
+    # 删库前留档所有对象 key（JMX + 参数文件）
+    object_keys = [script.file_key] if script.file_key else []
+    object_keys.extend(
+        df["key"] for df in (script.data_files or []) if isinstance(df, dict) and df.get("key")
+    )
+
+    # 被场景引用时拒绝删除（懒 import 防模型循环引用）
+    from app.models.scenario import Scenario
+    from app.models.scenario_script import ScenarioScript
+
+    scenario_names = (
+        (
+            await db.execute(
+                select(Scenario.name)
+                .join(ScenarioScript, ScenarioScript.scenario_id == Scenario.id)
+                .where(ScenarioScript.script_id == script_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if scenario_names:
+        preview = ", ".join(scenario_names[:5])
+        more = " 等" if len(scenario_names) > 5 else ""
+        raise BusinessError(
+            f"脚本已被 {len(scenario_names)} 个场景引用，请先在场景中移除：{preview}{more}",
+            code=3010,
+        )
+
+    await db.delete(script)
+    await db.commit()
+
+    for key in object_keys:
+        try:
+            await storage.delete_object(key)
+        except Exception as exc:  # noqa: BLE001
+            from loguru import logger
+
+            logger.warning(f"脚本 {script_id} MinIO 对象删除失败 ({key}): {exc}")
+
+    return ok({"id": script_id, "deleted": True})
+
+
 @router.get("/scripts/{script_id}/thread-groups")
 async def get_thread_groups(
     script_id: int,

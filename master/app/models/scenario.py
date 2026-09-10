@@ -1,24 +1,33 @@
-"""测试场景表：脚本 + 参数覆盖 + 压力机选择策略。"""
+"""测试场景表：多脚本组合。
 
-from sqlalchemy import JSON, ForeignKey, Integer, String
-from sqlalchemy.orm import Mapped, mapped_column
+脚本关联（含各自的压力机选择策略）与线程组设置分别落在
+scenario_script / scenario_script_tg 表，本表只存场景级配置
+（名称、全局 JVM 参数覆盖）。
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from sqlalchemy import JSON, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, IntPkMixin, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.scenario_script import ScenarioScript
 
 
 class Scenario(Base, IntPkMixin, TimestampMixin):
     __tablename__ = "test_scenario"
+    __table_args__ = (UniqueConstraint("name", name="uq_test_scenario_name"),)
 
     name: Mapped[str] = mapped_column(String(128), index=True)
-    script_id: Mapped[int] = mapped_column(ForeignKey("jmeter_script.id"))
-    # 参数覆盖 {"threads": "200", "ramp_up": "30"}，执行时拼 -J 参数
+    # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数
     param_overrides: Mapped[dict | None] = mapped_column(JSON, default=dict)
-    # 按 Agent 标签选压力机，如 ["机房A"]
-    agent_tags: Mapped[list | None] = mapped_column(JSON, default=list)
-    agent_count: Mapped[int] = mapped_column(Integer, default=1)
-    # 总线程数：>0 时按各 Agent CPU 核数权重拆分下发（-Jthreads 各机不同）；
-    # 0 表示不拆分，每台 Agent 按 param_overrides 全量加压
-    total_threads: Mapped[int] = mapped_column(Integer, default=0)
-    # 持续时长（秒），作为 -Jduration 覆盖
-    duration: Mapped[int] = mapped_column(Integer, default=300)
     description: Mapped[str] = mapped_column(String(512), default="")
+
+    # 关联脚本（含各脚本的压力机选择 + 线程组设置），创建时一并落库
+    scripts: Mapped[list[ScenarioScript]] = relationship(
+        back_populates="scenario", cascade="all, delete-orphan"
+    )

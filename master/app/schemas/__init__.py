@@ -83,16 +83,61 @@ class ScriptOut(BaseModel):
     description: str
 
 
+class ThreadGroupSettingIn(BaseModel):
+    """场景内单个线程组的加压参数（创建/更新场景时传入）。"""
+
+    thread_group_name: str
+    testclass: str = "ThreadGroup"
+    num_threads: int = 1
+    ramp_time: int = 0
+    loops: int = 1  # -1 表示无限循环
+    scheduler: bool = False
+    duration: int = 0  # scheduler=false 时为 0
+
+
+class ScenarioScriptIn(BaseModel):
+    """场景关联的单个脚本及其压力机选择 + 线程组设置。"""
+
+    script_id: int
+    order_index: int = 0
+    # 本脚本的压力机选择：按 Agent 标签过滤，如 ["机房A"]
+    agent_tags: list[str] = []
+    # 本脚本需要的压力机数量
+    agent_count: int = 1
+    thread_groups: list[ThreadGroupSettingIn] = []
+
+
 class ScenarioIn(BaseModel):
     name: str
-    script_id: int
+    # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数
     param_overrides: dict = {}
-    agent_tags: list[str] = []
-    agent_count: int = 1
-    # 总线程数：>0 按 Agent CPU 核数拆分；0 每台全量加压
-    total_threads: int = 0
-    duration: int = 300
     description: str = ""
+    scripts: list[ScenarioScriptIn] = []
+
+
+class ThreadGroupSettingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    thread_group_name: str
+    testclass: str
+    num_threads: int
+    ramp_time: int
+    loops: int
+    scheduler: bool
+    duration: int
+
+
+class ScenarioScriptOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    script_id: int
+    order_index: int
+    agent_tags: list | None
+    agent_count: int
+    script_name: str = ""
+    thread_groups: list[ThreadGroupSettingOut] = []
 
 
 class ScenarioOut(BaseModel):
@@ -100,13 +145,9 @@ class ScenarioOut(BaseModel):
 
     id: int
     name: str
-    script_id: int
     param_overrides: dict | None
-    agent_tags: list | None
-    agent_count: int
-    total_threads: int
-    duration: int
     description: str
+    scripts: list[ScenarioScriptOut] = []
 
 
 class ScheduleIn(BaseModel):
