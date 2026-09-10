@@ -55,9 +55,15 @@ async def ensure_bucket() -> None:
         logger.info(f"已创建 bucket: {settings.minio_bucket}")
 
 
-async def upload_bytes(object_key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+async def upload_bytes(
+    object_key: str, data: bytes, content_type: str = "application/octet-stream"
+) -> None:
     await get_minio().put_object(
-        get_settings().minio_bucket, object_key, io.BytesIO(data), length=len(data), content_type=content_type
+        get_settings().minio_bucket,
+        object_key,
+        io.BytesIO(data),
+        length=len(data),
+        content_type=content_type,
     )
 
 

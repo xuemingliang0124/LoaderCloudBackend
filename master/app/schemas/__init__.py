@@ -19,6 +19,9 @@ class AgentOut(BaseModel):
     hostname: str
     tags: list | None
     jmeter_version: str
+    plugins: list | None
+    cpu_cores: int
+    mem_total_gb: float
     status: str
     cpu_percent: float
     mem_percent: float
@@ -32,6 +35,10 @@ class AgentRegisterIn(BaseModel):
     hostname: str = ""
     tags: list[str] = []
     jmeter_version: str = ""
+    # 已安装插件 jar 文件名 + 压力机规格
+    plugins: list[str] = []
+    cpu_cores: int = 0
+    mem_total_gb: float = 0.0
 
 
 class AgentRegisterOut(BaseModel):
@@ -72,6 +79,7 @@ class ScriptOut(BaseModel):
     file_key: str
     data_files: list | None
     params: list | None
+    plugins: list | None
     description: str
 
 
@@ -81,6 +89,8 @@ class ScenarioIn(BaseModel):
     param_overrides: dict = {}
     agent_tags: list[str] = []
     agent_count: int = 1
+    # 总线程数：>0 按 Agent CPU 核数拆分；0 每台全量加压
+    total_threads: int = 0
     duration: int = 300
     description: str = ""
 
@@ -94,6 +104,7 @@ class ScenarioOut(BaseModel):
     param_overrides: dict | None
     agent_tags: list | None
     agent_count: int
+    total_threads: int
     duration: int
     description: str
 

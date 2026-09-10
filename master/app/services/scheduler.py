@@ -83,7 +83,9 @@ async def launch_scheduled_run(scenario_id: int, job_pk: int) -> None:
 
     try:
         result = await create_run(
-            scenario_id=scenario_id, trigger=RunTrigger.SCHEDULED, created_by="scheduler"
+            scenario_id=scenario_id,
+            trigger=RunTrigger.SCHEDULED,
+            created_by="scheduler",
         )
         async with SessionLocal() as db:
             await db.execute(

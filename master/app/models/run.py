@@ -14,8 +14,11 @@ class ScenarioRun(Base, IntPkMixin, TimestampMixin):
 
     run_no: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     scenario_id: Mapped[int] = mapped_column(ForeignKey("test_scenario.id"))
+    # 用 VARCHAR 而非本机 ENUM：状态值可能随版本新增（如 STOPPING），
+    # VARCHAR 避免每次扩枚举都要 ALTER TABLE
     status: Mapped[RunStatus] = mapped_column(
-        SAEnum(RunStatus, length=16), default=RunStatus.PENDING
+        SAEnum(RunStatus, length=16, native_enum=False),
+        default=RunStatus.PENDING,
     )
     trigger: Mapped[RunTrigger] = mapped_column(
         SAEnum(RunTrigger, length=16), default=RunTrigger.MANUAL

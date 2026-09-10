@@ -6,7 +6,9 @@ from app.main import app
 
 
 async def test_health() -> None:
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
         resp = await client.get("/api/v1/health")
     assert resp.status_code == 200
     body = resp.json()
@@ -15,6 +17,8 @@ async def test_health() -> None:
 
 
 async def test_protected_api_requires_token() -> None:
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
         resp = await client.get("/api/v1/agents")
     assert resp.status_code == 401

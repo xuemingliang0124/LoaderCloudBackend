@@ -16,6 +16,9 @@ class Scenario(Base, IntPkMixin, TimestampMixin):
     # 按 Agent 标签选压力机，如 ["机房A"]
     agent_tags: Mapped[list | None] = mapped_column(JSON, default=list)
     agent_count: Mapped[int] = mapped_column(Integer, default=1)
+    # 总线程数：>0 时按各 Agent CPU 核数权重拆分下发（-Jthreads 各机不同）；
+    # 0 表示不拆分，每台 Agent 按 param_overrides 全量加压
+    total_threads: Mapped[int] = mapped_column(Integer, default=0)
     # 持续时长（秒），作为 -Jduration 覆盖
     duration: Mapped[int] = mapped_column(Integer, default=300)
     description: Mapped[str] = mapped_column(String(512), default="")

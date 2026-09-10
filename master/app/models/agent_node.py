@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum as SAEnum, Float, String
+from sqlalchemy import JSON, DateTime, Enum as SAEnum, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IntPkMixin, TimestampMixin
@@ -19,6 +19,11 @@ class AgentNode(Base, IntPkMixin, TimestampMixin):
     # 分组标签，如 ["机房A", "高配"]
     tags: Mapped[list | None] = mapped_column(JSON, default=list)
     jmeter_version: Mapped[str] = mapped_column(String(32), default="")
+    # 已安装的 JMeter 插件 jar 文件名（lib/ext + 运行期 plugin_dir 扫描结果）
+    plugins: Mapped[list | None] = mapped_column(JSON, default=list)
+    # 压力机规格：逻辑核数 / 内存总量 GB（线程按规格拆分用）
+    cpu_cores: Mapped[int] = mapped_column(Integer, default=0)
+    mem_total_gb: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[AgentStatus] = mapped_column(
         SAEnum(AgentStatus, length=16), default=AgentStatus.OFFLINE
     )

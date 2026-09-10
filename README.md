@@ -77,11 +77,11 @@ uvicorn app.main:app --reload
 
 ### P2 — 生产化
 
-- [ ] stop_run 以 Agent 回报 stopped 为准再置终态（当前乐观置 STOPPED）— `orchestrator.py` `stop_run`
-- [ ] 结果汇聚内存态 `_pending_results` 持久化，支持 Master 重启恢复
-- [ ] 脚本级插件依赖声明：场景声明所需插件，Master 下发时校验 Agent 已安装，免改镜像
-- [ ] Agent 分组调度与线程数按压力机规格拆分
-- [ ] WebSocket 实时曲线替代前端轮询 ES
+- [x] stop_run 以 Agent 回报 stopped 为准再置终态：先发 stop 置 STOPPING，收齐 Agent result（或看门狗 `STOP_WAIT_TIMEOUT` 超时兜底）才置 STOPPED — `orchestrator.py` `stop_run`/`_maybe_finalize`/`_stop_watchdog`
+- [x] 结果汇聚持久化到 `run_agent_result` 表（替代内存态 `_pending_results`），Master 重启经 `recover_active_runs` 恢复汇聚现场
+- [x] 脚本级插件依赖声明：脚本上传插件 jar，Master 下发时比对 Agent 已装清单，缺失的预签 URL 随任务下发到 plugin_dir 并经 `-Jsearch_paths` 注入，免改镜像
+- [x] Agent 分组调度（标签 OR 匹配）与 `total_threads` 按压力机 CPU 核数最大余数法拆分 — `orchestrator.py` `split_threads`
+- [x] WebSocket 实时曲线替代前端轮询 ES：前端订阅 `/ws/runs/{run_no}?token=`，metrics/状态经 `FrontendHub` fan-out
 
 ### P3 — 平台能力
 

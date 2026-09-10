@@ -23,6 +23,8 @@ class AgentPhase(str, Enum):
 class RunStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
+    # 停止指令已下发，等待 Agent 回报终态；回报收齐（或看门狗超时）才置 STOPPED
+    STOPPING = "stopping"
     FINISHED = "finished"
     PARTIAL = "partial"
     FAILED = "failed"

@@ -30,6 +30,7 @@ class JMeterRunner:
         jmeter_args: dict[str, str],
         jtl_path: str,
         report_dir: str,
+        plugin_paths: list[str] | None = None,
     ) -> None:
         """以命令行模式启动 JMeter：-n -t x.jmx -J覆盖参数 -l x.jtl -e -o report。"""
         if self.running:
@@ -38,14 +39,23 @@ class JMeterRunner:
         # 预创建报告目录：JMeter -o 要求目录不存在或为空，且父目录必须已存在
         os.makedirs(report_dir, exist_ok=True)
         cmd = [
-            self.jmeter_bin, "-n",
-            "-t", jmx_path,
-            "-l", jtl_path,
-            "-e", "-o", report_dir,
+            self.jmeter_bin,
+            "-n",
+            "-t",
+            jmx_path,
+            "-l",
+            jtl_path,
+            "-e",
+            "-o",
+            report_dir,
             # 逐行落盘 JTL：默认 false 会缓冲到测试结束才 flush，
             # 增量 tail 解析（_metrics_loop）将读不到实时数据
             "-Jjmeter.save.saveservice.autoflush=true",
         ]
+        # 运行期下载的第三方插件：通过 search_paths 注入类路径（免改镜像）。
+        # 路径分隔符与 OS 一致（Windows ; / unix :）
+        if plugin_paths:
+            cmd.append(f"-Jsearch_paths={os.pathsep.join(plugin_paths)}")
         for key, value in jmeter_args.items():
             cmd.append(f"-J{key}={value}")
         logger.info(f"[{run_id}] 启动 JMeter: {' '.join(cmd)}")

@@ -14,12 +14,22 @@ async def ensure_default_user() -> None:
     async with SessionLocal() as db:
         exists = (await db.execute(select(User).limit(1))).scalars().first()
         if exists is None:
-            db.add(User(username="admin", password_hash=hash_password("admin123"), role="admin"))
+            db.add(
+                User(
+                    username="admin",
+                    password_hash=hash_password("admin123"),
+                    role="admin",
+                )
+            )
             await db.commit()
 
 
 async def get_by_username(db: AsyncSession, username: str) -> User | None:
-    return (await db.execute(select(User).where(User.username == username))).scalars().first()
+    return (
+        (await db.execute(select(User).where(User.username == username)))
+        .scalars()
+        .first()
+    )
 
 
 async def authenticate(db: AsyncSession, username: str, password: str) -> User:

@@ -12,6 +12,7 @@ from loguru import logger
 
 from pt_agent.config import get_settings
 from pt_agent.jtl_parser import parse_increment, parse_summary
+from pt_agent.plugins import ensure_plugins
 from pt_agent.protocol import MSG_METRICS, MSG_RESULT, Envelope
 from pt_agent.runner import JMeterRunner
 from pt_agent.state import AgentPhase, AgentState
@@ -70,10 +71,20 @@ class TaskExecutor:
             jtl_path = str(run_dir / f"{run_id}.jtl")
             report_dir = str(run_dir / "report")
 
+            # 第三方插件：缺失的下载到 plugin_dir，已装的返回 jar 路径供 search_paths
+            plugin_paths = await ensure_plugins(
+                data.get("plugins") or [], settings.plugin_dir_path
+            )
+
             self._state.set(AgentPhase.RUNNING, run_id)
             await self._reporter.send_status(run_id, AgentPhase.RUNNING)
             await self._runner.start(
-                run_id, jmx_path, jmeter_args, jtl_path, report_dir
+                run_id,
+                jmx_path,
+                jmeter_args,
+                jtl_path,
+                report_dir,
+                plugin_paths=plugin_paths,
             )
 
             metrics_task = asyncio.create_task(self._metrics_loop(run_id, jtl_path))

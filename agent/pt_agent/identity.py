@@ -46,7 +46,12 @@ def detect_host_ip(master_ws_url: str) -> str:
         sock.close()
 
 
-async def resolve_identity(settings: AgentSettings) -> AgentIdentity:
+async def resolve_identity(
+    settings: AgentSettings,
+    plugins: list[str] | None = None,
+    cpu_cores: int = 0,
+    mem_total_gb: float = 0.0,
+) -> AgentIdentity:
     """解析 Agent 固定身份：显式 AGENT_ID 优先；否则向 Master 按 IP 注册/查询。"""
     hostname = platform.node()
     ip = await asyncio.to_thread(detect_host_ip, settings.master_ws_url)
@@ -57,7 +62,14 @@ async def resolve_identity(settings: AgentSettings) -> AgentIdentity:
         return AgentIdentity(agent_id=settings.agent_id, ip=ip, hostname=hostname)
 
     url = f"{settings.master_http_base}/api/v1/agents/register"
-    payload = {"ip": ip, "hostname": hostname, "tags": settings.tag_list}
+    payload = {
+        "ip": ip,
+        "hostname": hostname,
+        "tags": settings.tag_list,
+        "plugins": plugins or [],
+        "cpu_cores": cpu_cores,
+        "mem_total_gb": mem_total_gb,
+    }
     delay = 1.0
     while True:
         try:

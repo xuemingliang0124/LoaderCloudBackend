@@ -1,7 +1,8 @@
-"""Agent 配置：环境变量 + pydantic-settings。"""
+"""agent 配置：环境变量 + pydantic-settings。"""
 
 import platform
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,9 +22,18 @@ class AgentSettings(BaseSettings):
     # JMeter 可执行文件路径
     jmeter_bin: str = "jmeter"
     work_dir: str = "./agent_workspace"
+    # 运行期插件目录：Master 下发的第三方插件 jar 落这里并通过
+    # -Jsearch_paths 注入 JMeter 类路径（免改镜像）；空则默认 work_dir/plugins
+    plugin_dir: str = ""
     heartbeat_interval: int = 10
     metrics_interval: int = 5
     reconnect_delay_max: int = 30
+
+    @property
+    def plugin_dir_path(self) -> str:
+        if self.plugin_dir:
+            return str(Path(self.plugin_dir).resolve())
+        return str((Path(self.work_dir).resolve() / "plugins"))
 
     @property
     def resolved_agent_id(self) -> str:

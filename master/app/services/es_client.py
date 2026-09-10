@@ -75,11 +75,19 @@ async def write_metrics(doc: dict) -> None:
     for item in body.pop("by_label", []) or []:
         await get_es().index(
             index=_metrics_index_for_ts(ts),
-            document={**body, "label": item.get("label", "_total"), **{
-                k: item[k] for k in ("interval_tps", "avg_rt", "p95_rt", "err_rate", "errors") if k in item
-            }},
+            document={
+                **body,
+                "label": item.get("label", "_total"),
+                **{
+                    k: item[k]
+                    for k in ("interval_tps", "avg_rt", "p95_rt", "err_rate", "errors")
+                    if k in item
+                },
+            },
         )
-    await get_es().index(index=_metrics_index_for_ts(ts), document={**body, "label": "_total"})
+    await get_es().index(
+        index=_metrics_index_for_ts(ts), document={**body, "label": "_total"}
+    )
 
 
 async def write_summary(run_no: str, summary: dict) -> None:
@@ -104,7 +112,11 @@ async def query_timeseries(
             "bool": {
                 "filter": [
                     {"term": {"run_no": run_no}},
-                    {"range": {"@timestamp": {"gte": start_ts * 1000, "lte": end_ts * 1000}}},
+                    {
+                        "range": {
+                            "@timestamp": {"gte": start_ts * 1000, "lte": end_ts * 1000}
+                        }
+                    },
                 ]
             }
         },
@@ -127,11 +139,15 @@ async def query_timeseries(
             }
         },
     }
-    resp = await get_es().search(body=body, index=f"{get_settings().es_index_prefix}-metrics-*")
+    resp = await get_es().search(
+        body=body, index=f"{get_settings().es_index_prefix}-metrics-*"
+    )
 
     # 拍平 ES 嵌套聚合为点列表：by_label.buckets[].over_time.buckets[]
     points: list[dict] = []
-    for label_bucket in (resp.get("aggregations", {}) or {}).get("by_label", {}).get("buckets", []):
+    for label_bucket in (
+        (resp.get("aggregations", {}) or {}).get("by_label", {}).get("buckets", [])
+    ):
         label = label_bucket.get("key")
         for tb in (label_bucket.get("over_time", {}) or {}).get("buckets", []):
             points.append(
@@ -140,7 +156,9 @@ async def query_timeseries(
                     "label": label,
                     "tps": round(tb.get("tps", {}).get("value") or 0.0, 3),
                     "avg_rt": round(tb.get("rt", {}).get("value") or 0.0, 2),
-                    "error_rate": round((tb.get("err", {}).get("value") or 0.0) * 100, 2),
+                    "error_rate": round(
+                        (tb.get("err", {}).get("value") or 0.0) * 100, 2
+                    ),
                 }
             )
     points.sort(key=lambda p: (p["ts"], str(p["label"])))

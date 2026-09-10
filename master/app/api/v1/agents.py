@@ -26,6 +26,9 @@ async def register_agent(payload: AgentRegisterIn) -> dict:
         hostname=payload.hostname,
         tags=payload.tags,
         jmeter_version=payload.jmeter_version,
+        plugins=payload.plugins,
+        cpu_cores=payload.cpu_cores,
+        mem_total_gb=payload.mem_total_gb,
     )
     return ok(
         AgentRegisterOut(

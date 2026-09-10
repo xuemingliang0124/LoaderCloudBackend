@@ -6,7 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # 应用
     app_name: str = "JMeter PT Platform Master"
@@ -40,6 +42,8 @@ class Settings(BaseSettings):
     # Agent 通信
     agent_heartbeat_interval: int = 10
     agent_offline_threshold: int = 3
+    # 停止等待 Agent 回报终态的超时秒数（看门狗兜底强制置 STOPPED）
+    stop_wait_timeout: int = 90
 
     # 调度
     scheduler_enabled: bool = True

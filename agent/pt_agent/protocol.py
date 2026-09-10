@@ -9,19 +9,20 @@ from typing import Any
 
 from pydantic import BaseModel
 
-# Master -> Agent
-MSG_TASK = "task"    # data: run_id, files[{key,save_as,url}], upload{jtl{key,url},report{key,url}}, jmeter_args, start_at
-MSG_STOP = "stop"     # data: run_id
+# master -> agent
+MSG_TASK = "task"  # data: run_id, files[{key,save_as,url}], plugins[{filename,url}],
+#                        #   upload{jtl{key,url},report{key,url}}, jmeter_args, start_at
+MSG_STOP = "stop"  # data: run_id
 MSG_PING = "ping"
 MSG_PONG = "pong"
 
-# Agent -> Master
-MSG_REGISTER = "register"    # data: agent_id, tags
-MSG_HEARTBEAT = "heartbeat"  # data: cpu, mem, net_in, net_out, status, current_run_id
-MSG_TASK_ACK = "task_ack"    # data: run_id, accepted, message
-MSG_STATUS = "status"        # data: run_id, phase, message
-MSG_METRICS = "metrics"      # data: run_no, interval_tps, avg_rt, p95_rt, err_rate, threads, by_label[]
-MSG_RESULT = "result"        # data: run_id, summary{samples,errors,p95_rt,max_tps,failed,by_label[{label,samples,errors,p95_rt,max_tps}]}, artifacts
+# agent -> master
+MSG_REGISTER = "register"  # data: agent_id, tags（握手 query 另带 ip/hostname/plugins/cpu_cores/mem_total_gb）
+MSG_HEARTBEAT = "heartbeat"  # data: cpu, mem, net_in, net_out, cpu_cores, mem_total_gb, status, current_run_id
+MSG_TASK_ACK = "task_ack"  # data: run_id, accepted, message
+MSG_STATUS = "status"  # data: run_id, phase, message
+MSG_METRICS = "metrics"  # data: run_no, interval_tps, avg_rt, p95_rt, err_rate, threads, by_label[]
+MSG_RESULT = "result"  # data: run_id, summary{samples,errors,p95_rt,max_tps,failed,by_label[{label,samples,errors,p95_rt,max_tps}]}, artifacts
 
 
 class Envelope(BaseModel):

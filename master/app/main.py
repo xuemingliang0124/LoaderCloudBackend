@@ -14,7 +14,7 @@ from app.core.config import get_settings
 from app.core.log import logger, setup_logging
 from app.db.session import engine
 from app.models import Base
-from app.services import es_client, storage, user_service
+from app.services import es_client, orchestrator, storage, user_service
 from app.services.agent_registry import mark_stale_agents_offline
 from app.services.exceptions import BusinessError
 from app.services.scheduler import start_scheduler, stop_scheduler
@@ -63,6 +63,11 @@ async def lifespan(_: FastAPI):
     await _retry("Elasticsearch", es_client.ensure_indices)
     await _retry("MinIO", storage.ensure_bucket)
     await start_scheduler()
+    # 从 run_agent_result 恢复 Master 重启前未收尾的执行现场
+    try:
+        await orchestrator.recover_active_runs()
+    except Exception:  # noqa: BLE001
+        logger.exception("重启执行现场恢复失败")
     checker = asyncio.create_task(_offline_check_loop())
     logger.info(f"{settings.app_name} 启动完成")
     yield
@@ -79,5 +84,6 @@ app.include_router(ws_router)
 @app.exception_handler(BusinessError)
 async def business_error_handler(_: Request, exc: BusinessError) -> JSONResponse:
     return JSONResponse(
-        status_code=400, content={"code": exc.code, "message": exc.message, "data": None}
+        status_code=400,
+        content={"code": exc.code, "message": exc.message, "data": None},
     )

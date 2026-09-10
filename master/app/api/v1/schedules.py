@@ -31,7 +31,9 @@ async def create_schedule(
     _: str = Depends(get_current_user),
 ) -> dict:
     _validate_cron(payload.cron)
-    job = ScheduleJob(name=payload.name, scenario_id=payload.scenario_id, cron=payload.cron)
+    job = ScheduleJob(
+        name=payload.name, scenario_id=payload.scenario_id, cron=payload.cron
+    )
     db.add(job)
     await db.commit()
     await db.refresh(job)
@@ -44,7 +46,11 @@ async def list_schedules(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ) -> dict:
-    rows = (await db.execute(select(ScheduleJob).order_by(ScheduleJob.id.desc()))).scalars().all()
+    rows = (
+        (await db.execute(select(ScheduleJob).order_by(ScheduleJob.id.desc())))
+        .scalars()
+        .all()
+    )
     return ok([ScheduleOut.model_validate(r).model_dump(mode="json") for r in rows])
 
 

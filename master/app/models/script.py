@@ -18,5 +18,8 @@ class Script(Base, IntPkMixin, TimestampMixin):
     data_files: Mapped[list | None] = mapped_column(JSON, default=list)
     # 占位符定义 [{"key": "threads", "default": "10", "desc": "并发线程数"}]
     params: Mapped[list | None] = mapped_column(JSON, default=list)
+    # 第三方插件依赖 [{"key": "scripts/{id}/{version}/plugins/x.jar", "filename": "x.jar"}]
+    # 下发时校验 Agent 已装；缺失则随任务下发，Agent 运行时装入 plugin_dir（免改镜像）
+    plugins: Mapped[list | None] = mapped_column(JSON, default=list)
     description: Mapped[str] = mapped_column(String(512), default="")
     created_by: Mapped[str] = mapped_column(String(64), default="")

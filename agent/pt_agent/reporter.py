@@ -30,11 +30,17 @@ class Reporter:
         state: AgentState,
         ip: str = "",
         hostname: str = "",
+        plugins: list[str] | None = None,
+        cpu_cores: int = 0,
+        mem_total_gb: float = 0.0,
     ) -> None:
         self._settings = settings
         self._state = state
         self._ip = ip
         self._hostname = hostname
+        self._plugins = plugins or []
+        self._cpu_cores = cpu_cores
+        self._mem_total_gb = mem_total_gb
         self._executor = None  # 延迟绑定（main 装配），避免与 executor 循环依赖
         self._ws = None
         self._connected = asyncio.Event()
@@ -84,6 +90,9 @@ class Reporter:
                 "tags": ",".join(settings.tag_list),
                 "ip": self._ip,
                 "hostname": self._hostname,
+                "plugins": ",".join(self._plugins),
+                "cpu_cores": str(self._cpu_cores),
+                "mem_total_gb": str(self._mem_total_gb),
             }
         )
         url = f"{settings.master_ws_url}?{query}"

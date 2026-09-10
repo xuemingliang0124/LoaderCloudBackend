@@ -1,8 +1,9 @@
-"""Agent WebSocket 连接注册中心：连接管理、消息路由、下发通道。
+"""agent WebSocket 连接注册中心：连接管理、消息路由、下发通道。
 
 分层说明：本模块属于服务层组件（ws 通道管理），消息处理依赖
 agent_registry（注册中心）与 es_client（指标落库），结果汇聚通过
-延迟 import orchestrator 避免循环依赖。
+延迟 import orchestrator 避免循环依赖。Agent 上报的指标/状态在落库的同时
+经 frontend_hub 实时推送给浏览器订阅者。
 """
 
 import asyncio
@@ -11,7 +12,10 @@ from fastapi import WebSocket
 from loguru import logger
 
 from app.services import agent_registry, es_client
+from app.ws.hub import frontend_hub
 from app.ws.protocol import (
+    FE_MSG_AGENT_STATUS,
+    FE_MSG_METRICS,
     MSG_HEARTBEAT,
     MSG_METRICS,
     MSG_REGISTER,
@@ -76,18 +80,42 @@ class AgentConnectionManager:
                 cpu=float(data.get("cpu", 0.0)),
                 mem=float(data.get("mem", 0.0)),
                 current_run_no=data.get("current_run_id"),
+                cpu_cores=int(data.get("cpu_cores", 0) or 0),
+                mem_total_gb=float(data.get("mem_total_gb", 0.0) or 0.0),
             )
         elif envelope.type == MSG_METRICS:
             await es_client.write_metrics({"agent_id": agent_id, **data})
+            run_no = str(data.get("run_no", ""))
+            if run_no:
+                # 实时推给前端订阅者（替代轮询 ES）
+                await frontend_hub.publish(
+                    run_no,
+                    Envelope.now(
+                        FE_MSG_METRICS, {"agent_id": agent_id, **data}
+                    ).model_dump(),
+                )
         elif envelope.type == MSG_STATUS:
             logger.info(
                 f"Agent[{agent_id}] run={data.get('run_id')} "
                 f"phase={data.get('phase')} {data.get('message', '')}"
             )
+            run_no = str(data.get("run_id", ""))
+            if run_no:
+                await frontend_hub.publish(
+                    run_no,
+                    Envelope.now(
+                        FE_MSG_AGENT_STATUS, {"agent_id": agent_id, **data}
+                    ).model_dump(),
+                )
         elif envelope.type == MSG_TASK_ACK:
-            logger.info(f"Agent[{agent_id}] 任务确认: {data.get('run_id')} accepted={data.get('accepted')}")
+            logger.info(
+                f"Agent[{agent_id}] 任务确认: {data.get('run_id')} "
+                f"accepted={data.get('accepted')}"
+            )
         elif envelope.type == MSG_RESULT:
-            from app.services.orchestrator import on_agent_result  # 延迟 import 防循环依赖
+            from app.services.orchestrator import (
+                on_agent_result,
+            )  # 延迟 import 防循环依赖
 
             await on_agent_result(
                 run_no=str(data.get("run_id", "")),

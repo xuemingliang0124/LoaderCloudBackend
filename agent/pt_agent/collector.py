@@ -6,7 +6,7 @@ import psutil
 
 
 def snapshot() -> dict:
-    """采集资源快照：CPU / 内存 / 网络累计流量。"""
+    """采集资源快照：CPU / 内存 / 网络累计流量 + 规格（核数、内存总量）。"""
     vm = psutil.virtual_memory()
     net = psutil.net_io_counters()
     return {
@@ -14,6 +14,8 @@ def snapshot() -> dict:
         "mem": vm.percent,
         "net_in": net.bytes_recv,
         "net_out": net.bytes_sent,
+        "cpu_cores": psutil.cpu_count(logical=True) or 0,
+        "mem_total_gb": round(vm.total / (1024**3), 2),
     }
 
 
