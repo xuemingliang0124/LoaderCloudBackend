@@ -4,6 +4,7 @@
 脚本上传不再带 plugin_files 参数。
 """
 
+import dataclasses
 import json
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
@@ -15,7 +16,8 @@ from app.db.session import get_db
 from app.models.script import Script
 from app.schemas import ScriptOut
 from app.schemas.common import ok
-from app.services import jmx_checker, storage
+from app.schemas.jmx_scan import JmxScanOut
+from app.services import jmx_checker, jmx_scanner, storage
 from app.services.exceptions import BusinessError
 
 router = APIRouter()
@@ -109,3 +111,24 @@ async def list_scripts(
 ) -> dict:
     rows = (await db.execute(select(Script).order_by(Script.id.desc()))).scalars().all()
     return ok([ScriptOut.model_validate(r).model_dump(mode="json") for r in rows])
+
+
+@router.get("/scripts/{script_id}/thread-groups")
+async def get_thread_groups(
+    script_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> dict:
+    """扫描脚本 JMX，返回线程组参数（前端展示与修改用）。
+
+    逐层校验 enabled，禁用链路下的线程组不返回；线程组参数中的用户变量
+    引用已按"线程组内变量 > 全局变量"作用域解析，无法静态解析的字段取 0。
+    """
+    script = (
+        await db.execute(select(Script).where(Script.id == script_id))
+    ).scalar_one_or_none()
+    if script is None:
+        raise BusinessError("脚本不存在", code=3007)
+    jmx_bytes = await storage.get_object_bytes(script.file_key)
+    result = jmx_scanner.scan_jmx(jmx_bytes)
+    return ok(JmxScanOut(**dataclasses.asdict(result)).model_dump(mode="json"))
