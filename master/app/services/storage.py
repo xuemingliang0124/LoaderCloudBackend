@@ -96,3 +96,8 @@ async def get_object_bytes(object_key: str) -> bytes:
         # miniopy_async 的 response 需显式 release
         if hasattr(response, "release"):
             await response.release()
+
+
+async def delete_object(object_key: str) -> None:
+    """删除 MinIO 对象（插件被删除时联动清理 jar 文件）。"""
+    await get_minio().remove_object(get_settings().minio_bucket, object_key)

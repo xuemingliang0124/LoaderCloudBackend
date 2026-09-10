@@ -185,16 +185,17 @@ async def delete_plugin(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ) -> dict:
-    """删除插件：先推 remove 给在线 Agent，再清 agent_plugin 关联，最后删 jmeter_plugin。
+    """删除插件：推 remove 给在线 Agent → 清 agent_plugin → 删 MinIO 对象 → 删 jmeter_plugin。
 
     顺序约束：agent_plugin.plugin_id 有外键指向 jmeter_plugin.id，
     必须先删子表（agent_plugin）再删父表（jmeter_plugin），否则 1451 报错。
-    MinIO 对象保留做审计。
+    MinIO 对象在删库前删（拿 file_key 后再删主记录），删除失败仅告警不阻断。
     """
     plugin = await db.get(JmeterPlugin, plugin_id)
     if plugin is None:
         raise BusinessError("插件不存在", code=3204)
     sha = plugin.sha256
+    file_key = plugin.file_key
 
     # 1. 先给在线 Agent 推卸载消息（让 Agent 删本地 jar）
     from app.services.plugin_sync import broadcast_plugin_remove
@@ -208,6 +209,17 @@ async def delete_plugin(
     # 3. 删 jmeter_plugin 主记录（父表）
     await db.delete(plugin)
     await db.commit()
+
+    # 4. 删 MinIO 对象（库已删完，失败仅告警，不回滚 DB）
+    if file_key:
+        try:
+            await storage.delete_object(file_key)
+        except Exception as exc:  # noqa: BLE001
+            # 审计日志即可：DB 已删，MinIO 残留对象可由运维定期清理
+            from loguru import logger
+
+            logger.warning(f"插件 {plugin_id} MinIO 对象删除失败: {exc}")
+
     return ok({"id": plugin_id, "deleted": True})
 
 
