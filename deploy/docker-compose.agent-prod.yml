@@ -1,0 +1,55 @@
+# 压力机侧：Agent 容器（生产部署版，无需源码）
+#
+# 本文件只引用预构建的镜像，不包含任何源码路径，可安全分发给外部压测机。
+# 镜像由开发/CI 机器构建后推送到私有镜像仓库，或用 docker save/load 离线分发。
+#
+# 一、镜像构建与分发（在有源码的机器上执行）：
+#   1) 构建：
+#      docker build -t ptp-agent:<tag> ./agent
+#   2) 推送私有仓库（推荐）：
+#      docker tag ptp-agent:<tag> <registry>/ptp-agent:<tag>
+#      docker push <registry>/ptp-agent:<tag>
+#   3) 或离线分发为 tar：
+#      docker save -o ptp-agent-<tag>.tar ptp-agent:<tag>
+#      # 拷贝到压力机后：
+#      docker load -i ptp-agent-<tag>.tar
+#
+# 二、压力机启动（bridge 模式，跨机部署）：
+#   AGENT_IMAGE=<registry>/ptp-agent:<tag> \
+#   MASTER_WS_URL=ws://<master-host>:8000/ws/agent \
+#   AGENT_ID=agent-01 TAGS=机房A \
+#   docker compose -f docker-compose.agent-prod.yml up -d
+#
+# 三、Linux 生产压测机（推荐 host 网络）：
+#   取消 network_mode: host 注释，并删除 extra_hosts 段。
+
+name: ptp-agent
+
+services:
+  agent:
+    image: ${AGENT_IMAGE:-ptp-agent:latest}
+    # Linux 压测机取消下一行注释以使用 host 网络（生产必须）
+    # network_mode: host
+    environment:
+      MASTER_WS_URL: ${MASTER_WS_URL:-ws://host.docker.internal:8000/ws/agent}
+      AGENT_ID: ${AGENT_ID:-}
+      TAGS: ${TAGS:-default}
+      JMETER_BIN: jmeter
+    # host 网络下 extra_hosts 无效；bridge 模式下用于回连宿主机 Master
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 工作目录挂到宿主机 SSD，避免 overlay2 拖慢 JTL/报告 I/O
+    volumes:
+      - ${AGENT_WORKSPACE:-/data/ptp_agent/workspace}:/app/agent_workspace
+    # 高并发压测需要的文件描述符与端口范围
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+      net.ipv4.tcp_tw_reuse: "1"
+    # 专机压测建议不加资源限制；共享机按需打开
+    # cpus: "4"
+    # mem_limit: 8g
+    restart: unless-stopped
