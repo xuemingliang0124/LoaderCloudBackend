@@ -13,3 +13,9 @@ def ok(data: Any = None, message: str = "ok") -> dict:
 class PageQuery(BaseModel):
     page: int = Field(1, ge=1)
     page_size: int = Field(20, ge=1, le=100)
+
+
+def like_pattern(keyword: str) -> str:
+    """构造模糊匹配串 %kw%，转义反斜杠与 %/_ 通配符（配合 LIKE escape='\\'）。"""
+    escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"

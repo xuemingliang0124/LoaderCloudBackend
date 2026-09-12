@@ -1,7 +1,7 @@
 """场景管理：CRUD（创建支持多脚本组合 + 线程组级设置，名称唯一）。"""
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -17,7 +17,7 @@ from app.schemas import (
     ScenarioScriptOut,
     ThreadGroupSettingOut,
 )
-from app.schemas.common import ok
+from app.schemas.common import like_pattern, ok
 from app.services.exceptions import BusinessError
 
 router = APIRouter()
@@ -132,9 +132,17 @@ async def create_scenario(
 
 @router.get("/scenarios")
 async def list_scenarios(
+    name: str | None = Query(default=None, description="按场景名模糊查询"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ) -> dict:
+    filters = []
+    if name:
+        filters.append(Scenario.name.like(like_pattern(name.strip()), escape="\\"))
+
+    total = await db.scalar(select(func.count()).select_from(Scenario).where(*filters))
     rows = (
         (
             await db.execute(
@@ -147,10 +155,14 @@ async def list_scenarios(
                         ScenarioScript.thread_groups
                     )
                 )
+                .where(*filters)
                 .order_by(Scenario.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
             )
         )
         .scalars()
         .all()
     )
-    return ok([_build_scenario_out(r) for r in rows])
+    items = [_build_scenario_out(r) for r in rows]
+    return ok({"total": int(total or 0), "items": items})

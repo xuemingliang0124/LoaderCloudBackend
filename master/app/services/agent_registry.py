@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -12,6 +12,7 @@ from app.models.agent_node import AgentNode
 from app.models.agent_plugin import AgentPlugin
 from app.models.enums import AgentStatus
 from app.models.plugin import JmeterPlugin
+from app.schemas.common import like_pattern
 
 
 async def _sync_agent_plugin_records(
@@ -241,9 +242,41 @@ async def mark_stale_agents_offline(connected_ids: set[str]) -> int:
         return result.rowcount or 0
 
 
-async def list_agents(db: AsyncSession) -> list[AgentNode]:
-    result = await db.execute(select(AgentNode).order_by(AgentNode.id))
-    return list(result.scalars().all())
+async def list_agents(
+    db: AsyncSession,
+    *,
+    keyword: str | None = None,
+    status: AgentStatus | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[list[AgentNode], int]:
+    """分页查询压力机。
+
+    keyword 非空时模糊匹配 agent_id / ip / hostname（OR 语义）；
+    status 非空时按在线状态精确过滤。返回 (当前页节点, 总数)。
+    """
+    filters = []
+    if keyword:
+        pattern = like_pattern(keyword.strip())
+        filters.append(
+            or_(
+                AgentNode.agent_id.like(pattern, escape="\\"),
+                AgentNode.ip.like(pattern, escape="\\"),
+                AgentNode.hostname.like(pattern, escape="\\"),
+            )
+        )
+    if status is not None:
+        filters.append(AgentNode.status == status)
+
+    total = await db.scalar(select(func.count()).select_from(AgentNode).where(*filters))
+    result = await db.execute(
+        select(AgentNode)
+        .where(*filters)
+        .order_by(AgentNode.id)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return list(result.scalars().all()), int(total or 0)
 
 
 async def get_nodes(agent_ids: list[str]) -> dict[str, AgentNode]:

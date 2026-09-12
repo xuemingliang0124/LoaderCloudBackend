@@ -1,10 +1,11 @@
 """压力机管理：注册（Agent 启动调用）+ 列表查询。"""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.models.enums import AgentStatus
 from app.schemas import AgentOut, AgentRegisterIn, AgentRegisterOut
 from app.schemas.common import ok
 from app.services import agent_registry
@@ -48,8 +49,21 @@ async def register_agent(payload: AgentRegisterIn) -> dict:
 
 @router.get("/agents")
 async def list_agents(
+    keyword: str | None = Query(
+        default=None, description="模糊匹配 agent_id/IP/主机名"
+    ),
+    status: AgentStatus | None = Query(default=None, description="按在线状态精确过滤"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ) -> dict:
-    nodes = await agent_registry.list_agents(db)
-    return ok([AgentOut.model_validate(n).model_dump(mode="json") for n in nodes])
+    nodes, total = await agent_registry.list_agents(
+        db,
+        keyword=keyword,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    items = [AgentOut.model_validate(n).model_dump(mode="json") for n in nodes]
+    return ok({"total": total, "items": items})

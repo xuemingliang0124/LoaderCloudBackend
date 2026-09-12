@@ -1,7 +1,7 @@
 """定时场景管理：创建/启停，联动 APScheduler。"""
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apscheduler.triggers.cron import CronTrigger
@@ -10,7 +10,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.schedule import ScheduleJob
 from app.schemas import ScheduleIn, ScheduleOut
-from app.schemas.common import ok
+from app.schemas.common import like_pattern, ok
 from app.services import scheduler as scheduler_service
 from app.services.exceptions import BusinessError
 
@@ -43,15 +43,37 @@ async def create_schedule(
 
 @router.get("/schedules")
 async def list_schedules(
+    name: str | None = Query(default=None, description="按任务名模糊查询"),
+    enabled: bool | None = Query(default=None, description="按启用状态精确过滤"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ) -> dict:
+    filters = []
+    if name:
+        filters.append(ScheduleJob.name.like(like_pattern(name.strip()), escape="\\"))
+    if enabled is not None:
+        filters.append(ScheduleJob.enabled == enabled)
+
+    total = await db.scalar(
+        select(func.count()).select_from(ScheduleJob).where(*filters)
+    )
     rows = (
-        (await db.execute(select(ScheduleJob).order_by(ScheduleJob.id.desc())))
+        (
+            await db.execute(
+                select(ScheduleJob)
+                .where(*filters)
+                .order_by(ScheduleJob.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
         .scalars()
         .all()
     )
-    return ok([ScheduleOut.model_validate(r).model_dump(mode="json") for r in rows])
+    items = [ScheduleOut.model_validate(r).model_dump(mode="json") for r in rows]
+    return ok({"total": int(total or 0), "items": items})
 
 
 @router.post("/schedules/{job_id}/toggle")

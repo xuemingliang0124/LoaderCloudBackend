@@ -7,15 +7,15 @@
 import dataclasses
 import json
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.script import Script
 from app.schemas import ScriptOut
-from app.schemas.common import ok
+from app.schemas.common import like_pattern, ok
 from app.schemas.jmx_scan import JmxScanOut
 from app.services import jmx_checker, jmx_scanner, storage
 from app.services.exceptions import BusinessError
@@ -106,11 +106,32 @@ async def upload_script(
 
 @router.get("/scripts")
 async def list_scripts(
+    name: str | None = Query(default=None, description="按脚本名模糊查询"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ) -> dict:
-    rows = (await db.execute(select(Script).order_by(Script.id.desc()))).scalars().all()
-    return ok([ScriptOut.model_validate(r).model_dump(mode="json") for r in rows])
+    filters = []
+    if name:
+        filters.append(Script.name.like(like_pattern(name.strip()), escape="\\"))
+
+    total = await db.scalar(select(func.count()).select_from(Script).where(*filters))
+    rows = (
+        (
+            await db.execute(
+                select(Script)
+                .where(*filters)
+                .order_by(Script.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items = [ScriptOut.model_validate(r).model_dump(mode="json") for r in rows]
+    return ok({"total": int(total or 0), "items": items})
 
 
 @router.put("/scripts/{script_id}/jmx")
@@ -178,7 +199,9 @@ async def delete_script(
     # 删库前留档所有对象 key（JMX + 参数文件）
     object_keys = [script.file_key] if script.file_key else []
     object_keys.extend(
-        df["key"] for df in (script.data_files or []) if isinstance(df, dict) and df.get("key")
+        df["key"]
+        for df in (script.data_files or [])
+        if isinstance(df, dict) and df.get("key")
     )
 
     # 被场景引用时拒绝删除（懒 import 防模型循环引用）
