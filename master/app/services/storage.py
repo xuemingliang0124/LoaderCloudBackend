@@ -97,3 +97,24 @@ async def get_object_bytes(object_key: str) -> bytes:
 async def delete_object(object_key: str) -> None:
     """删除 MinIO 对象（插件被删除时联动清理 jar 文件）。"""
     await get_minio().remove_object(get_settings().minio_bucket, object_key)
+
+
+async def delete_prefix(prefix: str) -> int:
+    """删除指定前缀下全部对象（如 runs/{run_no}/ 产物），返回删除数量。
+
+    单个对象删除/列举失败仅告警不抛出（与插件清理口径一致），
+    调用方不应依赖本函数的成功与否决定事务走向。
+    """
+    bucket = get_settings().minio_bucket
+    client = get_minio()
+    removed = 0
+    try:
+        async for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
+            try:
+                await client.remove_object(bucket, obj.object_name)
+                removed += 1
+            except Exception:  # noqa: BLE001
+                logger.warning(f"MinIO 对象删除失败: {obj.object_name}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"MinIO 前缀列举失败 prefix={prefix}: {exc}")
+    return removed
