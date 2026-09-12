@@ -34,3 +34,12 @@ class RunStatus(str, Enum):
 class RunTrigger(str, Enum):
     MANUAL = "manual"
     SCHEDULED = "scheduled"
+
+
+class ScenarioType(str, Enum):
+    """压测场景类型，四选一。"""
+
+    SINGLE_BASELINE = "单交易基准"
+    SINGLE_LOAD = "单交易负载"
+    MIXED = "混合场景"
+    STABILITY = "稳定性"

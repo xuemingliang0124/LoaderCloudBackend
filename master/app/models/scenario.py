@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, String, UniqueConstraint
+from sqlalchemy import JSON, Enum as SAEnum, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, IntPkMixin, TimestampMixin
+from app.models.enums import ScenarioType
 
 if TYPE_CHECKING:
     from app.models.scenario_script import ScenarioScript
@@ -23,6 +24,13 @@ class Scenario(Base, IntPkMixin, TimestampMixin):
     __table_args__ = (UniqueConstraint("name", name="uq_test_scenario_name"),)
 
     name: Mapped[str] = mapped_column(String(128), index=True)
+    # 场景类型，四选一；DB 存枚举 name，API 层出中文 value（与 RunStatus 口径一致）
+    scenario_type: Mapped[ScenarioType] = mapped_column(
+        SAEnum(ScenarioType, length=32, native_enum=False),
+        default=ScenarioType.SINGLE_BASELINE,
+    )
+    # 场景级运行时间（秒），调度/展示用；实际压测时长由各线程组 scheduler+duration 决定
+    duration: Mapped[int] = mapped_column(Integer, default=0)
     # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数
     param_overrides: Mapped[dict | None] = mapped_column(JSON, default=dict)
     description: Mapped[str] = mapped_column(String(512), default="")

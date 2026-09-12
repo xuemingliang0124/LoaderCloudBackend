@@ -3,7 +3,13 @@
 from app.models.agent_node import AgentNode
 from app.models.agent_plugin import AgentPlugin
 from app.models.base import Base, IntPkMixin, TimestampMixin
-from app.models.enums import AgentPhase, AgentStatus, RunStatus, RunTrigger
+from app.models.enums import (
+    AgentPhase,
+    AgentStatus,
+    RunStatus,
+    RunTrigger,
+    ScenarioType,
+)
 from app.models.plugin import JmeterPlugin
 from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
@@ -26,6 +32,7 @@ __all__ = [
     "RunStatus",
     "RunTrigger",
     "Scenario",
+    "ScenarioType",
     "ScenarioRun",
     "ScenarioScript",
     "ScenarioScriptTG",

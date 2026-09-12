@@ -7,6 +7,8 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.models.enums import RunStatus
+from app.models.run import ScenarioRun
 from app.models.scenario import Scenario
 from app.models.scenario_script import ScenarioScript
 from app.models.scenario_script_tg import ScenarioScriptTG
@@ -15,6 +17,7 @@ from app.schemas import (
     ScenarioIn,
     ScenarioOut,
     ScenarioScriptOut,
+    ScenarioUpdateIn,
     ThreadGroupSettingOut,
 )
 from app.schemas.common import like_pattern, ok
@@ -46,6 +49,8 @@ def _build_scenario_out(scenario: Scenario) -> dict:
     return ScenarioOut(
         id=scenario.id,
         name=scenario.name,
+        scenario_type=scenario.scenario_type,
+        duration=scenario.duration,
         param_overrides=scenario.param_overrides,
         description=scenario.description,
         scripts=scripts_out,
@@ -83,6 +88,8 @@ async def create_scenario(
 
     scenario = Scenario(
         name=payload.name,
+        scenario_type=payload.scenario_type,
+        duration=payload.duration,
         param_overrides=payload.param_overrides,
         description=payload.description,
     )
@@ -166,3 +173,112 @@ async def list_scenarios(
     )
     items = [_build_scenario_out(r) for r in rows]
     return ok({"total": int(total or 0), "items": items})
+
+
+@router.put("/scenarios/{scenario_id}")
+async def update_scenario(
+    scenario_id: int,
+    payload: ScenarioUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+) -> dict:
+    """更新场景：基础信息 + 关联脚本（全量替换，含线程组设置）。"""
+    scenario = (
+        await db.execute(select(Scenario).where(Scenario.id == scenario_id))
+    ).scalar_one_or_none()
+    if scenario is None:
+        raise BusinessError("场景不存在", code=3013)
+
+    # 运行中/待执行的场景不允许修改，避免下发配置与落库配置不一致
+    running = (
+        await db.execute(
+            select(ScenarioRun).where(
+                ScenarioRun.scenario_id == scenario_id,
+                ScenarioRun.status.in_(
+                    [RunStatus.PENDING, RunStatus.RUNNING, RunStatus.STOPPING]
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    if running is not None:
+        raise BusinessError("场景存在未结束的执行任务，无法修改", code=3014)
+
+    # 名称唯一校验（排除自身）
+    dup = (
+        await db.execute(
+            select(Scenario).where(
+                Scenario.name == payload.name, Scenario.id != scenario_id
+            )
+        )
+    ).scalar_one_or_none()
+    if dup is not None:
+        raise BusinessError(f"场景名称已存在: {payload.name}", code=3010)
+
+    # 脚本去重 + 存在性校验
+    script_ids = [s.script_id for s in payload.scripts]
+    if len(script_ids) != len(set(script_ids)):
+        raise BusinessError("同一场景内脚本不可重复", code=3011)
+    if script_ids:
+        scripts = (
+            (await db.execute(select(Script).where(Script.id.in_(script_ids))))
+            .scalars()
+            .all()
+        )
+        found_ids = {s.id for s in scripts}
+        missing = [sid for sid in script_ids if sid not in found_ids]
+        if missing:
+            raise BusinessError(f"脚本不存在: {missing}", code=3012)
+
+    # ---- 更新场景基础信息 ----
+    scenario.name = payload.name
+    scenario.scenario_type = payload.scenario_type
+    scenario.duration = payload.duration
+    scenario.param_overrides = payload.param_overrides
+    scenario.description = payload.description
+
+    # ---- 全量替换脚本关联 ----
+    # 删除旧关联：cascade="all, delete-orphan" 会连带删 scenario_script_tg
+    for old_ss in list(scenario.scripts):
+        db.delete(old_ss)
+    await db.flush()
+
+    # 重建关联
+    for idx, s in enumerate(payload.scripts):
+        ss = ScenarioScript(
+            scenario_id=scenario.id,
+            script_id=s.script_id,
+            order_index=s.order_index if s.order_index else idx,
+            agent_tags=s.agent_tags,
+            agent_count=s.agent_count,
+        )
+        db.add(ss)
+        await db.flush()
+        for tg in s.thread_groups:
+            db.add(
+                ScenarioScriptTG(
+                    scenario_script_id=ss.id,
+                    thread_group_name=tg.thread_group_name,
+                    testclass=tg.testclass,
+                    num_threads=tg.num_threads,
+                    ramp_time=tg.ramp_time,
+                    loops=tg.loops,
+                    scheduler=tg.scheduler,
+                    duration=tg.duration,
+                )
+            )
+
+    await db.commit()
+    # 回读关联构造响应
+    scenario = (
+        await db.execute(
+            select(Scenario)
+            .options(selectinload(Scenario.scripts).selectinload(ScenarioScript.script))
+            .options(
+                selectinload(Scenario.scripts).selectinload(
+                    ScenarioScript.thread_groups
+                )
+            )
+            .where(Scenario.id == scenario.id)
+        )
+    ).scalar_one()
+    return ok(_build_scenario_out(scenario))

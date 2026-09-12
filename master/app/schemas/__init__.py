@@ -2,7 +2,9 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.enums import ScenarioType
 
 
 class LoginIn(BaseModel):
@@ -86,32 +88,109 @@ class ScriptOut(BaseModel):
 class ThreadGroupSettingIn(BaseModel):
     """场景内单个线程组的加压参数（创建/更新场景时传入）。"""
 
-    thread_group_name: str
-    testclass: str = "ThreadGroup"
-    num_threads: int = 1
-    ramp_time: int = 0
-    loops: int = 1  # -1 表示无限循环
-    scheduler: bool = False
-    duration: int = 0  # scheduler=false 时为 0
+    thread_group_name: str = Field(..., examples=["登录接口压测"])
+    testclass: str = Field("ThreadGroup", examples=["ThreadGroup"])
+    num_threads: int = Field(1, examples=[100])
+    ramp_time: int = Field(0, examples=[10])
+    loops: int = Field(1, examples=[1])  # -1 表示无限循环
+    scheduler: bool = Field(False, examples=[True])
+    duration: int = Field(0, examples=[300])  # scheduler=false 时为 0
 
 
 class ScenarioScriptIn(BaseModel):
     """场景关联的单个脚本及其压力机选择 + 线程组设置。"""
 
-    script_id: int
-    order_index: int = 0
+    script_id: int = Field(..., examples=[1])
+    order_index: int = Field(0, examples=[0])
     # 本脚本的压力机选择：按 Agent 标签过滤，如 ["机房A"]
-    agent_tags: list[str] = []
+    agent_tags: list[str] = Field(default_factory=list, examples=[["机房A"]])
     # 本脚本需要的压力机数量
-    agent_count: int = 1
-    thread_groups: list[ThreadGroupSettingIn] = []
+    agent_count: int = Field(1, examples=[2])
+    thread_groups: list[ThreadGroupSettingIn] = Field(default_factory=list)
 
 
 class ScenarioIn(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "登录接口全链路压测",
+                "scenario_type": "单交易基准",
+                "duration": 600,
+                "param_overrides": {"host": "api.demo.com"},
+                "description": "模拟高峰时段登录请求",
+                "scripts": [
+                    {
+                        "script_id": 1,
+                        "order_index": 0,
+                        "agent_tags": ["机房A"],
+                        "agent_count": 2,
+                        "thread_groups": [
+                            {
+                                "thread_group_name": "登录接口压测",
+                                "testclass": "ThreadGroup",
+                                "num_threads": 100,
+                                "ramp_time": 10,
+                                "loops": 1,
+                                "scheduler": True,
+                                "duration": 300,
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
     name: str
+    scenario_type: ScenarioType
+    # 场景级运行时间（秒）
+    duration: int = 0
     # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数
     param_overrides: dict = {}
     description: str = ""
+    scripts: list[ScenarioScriptIn] = []
+
+
+class ScenarioUpdateIn(BaseModel):
+    """场景更新请求：基础字段 + 关联脚本（全量替换）。"""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "登录接口全链路压测",
+                "scenario_type": "单交易基准",
+                "duration": 600,
+                "param_overrides": {"host": "api.demo.com"},
+                "description": "模拟高峰时段登录请求",
+                "scripts": [
+                    {
+                        "script_id": 1,
+                        "order_index": 0,
+                        "agent_tags": ["机房A"],
+                        "agent_count": 2,
+                        "thread_groups": [
+                            {
+                                "thread_group_name": "登录接口压测",
+                                "testclass": "ThreadGroup",
+                                "num_threads": 100,
+                                "ramp_time": 10,
+                                "loops": 1,
+                                "scheduler": True,
+                                "duration": 300,
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    name: str
+    scenario_type: ScenarioType
+    duration: int = 0
+    param_overrides: dict = {}
+    description: str = ""
+    # 全量替换：传空数组表示清空场景下所有脚本关联
     scripts: list[ScenarioScriptIn] = []
 
 
@@ -145,6 +224,8 @@ class ScenarioOut(BaseModel):
 
     id: int
     name: str
+    scenario_type: ScenarioType
+    duration: int
     param_overrides: dict | None
     description: str
     scripts: list[ScenarioScriptOut] = []
