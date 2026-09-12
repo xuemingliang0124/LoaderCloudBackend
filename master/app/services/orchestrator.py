@@ -19,13 +19,13 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.models.enums import RunStatus, RunTrigger
+from app.models.enums import RunStatus, RunTrigger, ScenarioType
 from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
 from app.models.scenario import Scenario
 from app.models.scenario_script import ScenarioScript
 from app.models.scenario_script_tg import ScenarioScriptTG
-from app.services import agent_registry, es_client, storage
+from app.services import agent_registry, es_client, jmx_assembler, storage
 from app.services.exceptions import BusinessError
 from app.ws.hub import frontend_hub
 from app.ws.manager import agent_manager
@@ -36,6 +36,35 @@ _ACTIVE_STATUSES = (RunStatus.PENDING, RunStatus.RUNNING, RunStatus.STOPPING)
 
 # 停止看门狗：run_no -> 超时强制收尾任务（Agent 回报丢失/离线时兜底）
 _watchdogs: dict[str, asyncio.Task] = {}
+
+# 单交易基准场景固定参数（优先级高于场景保存的线程组设置）
+_BASELINE_NUM_THREADS = 5
+_BASELINE_LOOPS = 100
+
+
+def _effective_thread_group_settings(
+    tgs: list[ScenarioScriptTG], scenario_type: ScenarioType
+) -> list[ScenarioScriptTG]:
+    """计算实际生效的线程组设置。
+
+    单交易基准场景：线程数固定 5、循环 100、关闭调度器（duration 无效）；
+    其余场景类型直接使用数据库保存值。ramp_time 沿用保存值。
+    """
+    if scenario_type != ScenarioType.SINGLE_BASELINE:
+        return list(tgs)
+    return [
+        ScenarioScriptTG(
+            scenario_script_id=tg.scenario_script_id,
+            thread_group_name=tg.thread_group_name,
+            testclass=tg.testclass,
+            num_threads=_BASELINE_NUM_THREADS,
+            ramp_time=tg.ramp_time,
+            loops=_BASELINE_LOOPS,
+            scheduler=False,
+            duration=0,
+        )
+        for tg in tgs
+    ]
 
 
 async def create_run(
@@ -137,7 +166,8 @@ async def create_run(
             for aid in all_agent_ids
         }
 
-    # 逐脚本构造任务并下发（插件由 PluginSyncer 对齐，不随任务下发）
+    # 逐脚本组装执行用 JMX 并按 Agent 下发（插件由 PluginSyncer 对齐，不随任务下发）
+    scenario_type = scenario.scenario_type
     start_at = int(time.time()) + 5
     for ss in scenario.scripts:
         aids = script_agents[ss.id]
@@ -147,60 +177,91 @@ async def create_run(
                 f"场景关联脚本不存在或缺少脚本文件: script_id={ss.script_id}",
                 code=2005,
             )
-        # 本脚本文件清单
-        files: list[dict] = [
-            {
-                "key": script.file_key,
-                "save_as": script.file_key.rsplit("/", 1)[-1],
-                "url": await storage.presigned_get(script.file_key),
-            }
-        ]
-        for df in script.data_files or []:
-            files.append(
-                {
-                    "key": df["key"],
-                    "save_as": df["filename"],
-                    "url": await storage.presigned_get(df["key"]),
-                }
-            )
-        # 本脚本线程组设置 → -J 参数（key 加线程组名后缀）
-        jmeter_args = dict(base_args)
-        tg_settings: list[ScenarioScriptTG] = []
-        for tg in ss.thread_groups:
-            tg_settings.append(tg)
-            jmeter_args[f"threads_{tg.thread_group_name}"] = str(tg.num_threads)
-            jmeter_args[f"ramp_up_{tg.thread_group_name}"] = str(tg.ramp_time)
-            jmeter_args[f"loops_{tg.thread_group_name}"] = str(tg.loops)
-            if tg.scheduler:
-                jmeter_args[f"duration_{tg.thread_group_name}"] = str(tg.duration)
 
-        # 线程按本脚本 Agent 集合的 CPU 核数拆分
+        # 原始脚本只读，组装后写入 runs/{run_no}/ 供 Agent 下载
+        original_bytes = await storage.get_object_bytes(script.file_key)
+        save_name = script.file_key.rsplit("/", 1)[-1]
+        # 场景级 -J 参数（host 等），所有 Agent 共用；线程参数已写入 XML，不再走 -J
+        scenario_args = dict(base_args)
+
+        # 生效设置（单交易基准固定参数在此统一处理，确保多 Agent 拆分基于固定值）
+        effective_tgs = _effective_thread_group_settings(
+            list(ss.thread_groups), scenario_type
+        )
+
+        # 线程数按 Agent CPU 核数拆分；每台 Agent 组装一份带各自线程数的 JMX
         nodes = await agent_registry.get_nodes(aids)
-        agent_thread_args: dict[str, dict] = {aid: {} for aid in aids}
         if len(aids) > 1:
             weights = {
                 aid: max(1, (nodes[aid].cpu_cores or 0)) if aid in nodes else 1
                 for aid in aids
             }
-            for tg in tg_settings:
+            # 每个 Agent 对应一份设置副本，仅 num_threads 被拆分
+            per_agent_tgs: dict[str, list[ScenarioScriptTG]] = {
+                aid: [
+                    ScenarioScriptTG(
+                        scenario_script_id=tg.scenario_script_id,
+                        thread_group_name=tg.thread_group_name,
+                        testclass=tg.testclass,
+                        num_threads=0,  # 稍后按拆分结果填充
+                        ramp_time=tg.ramp_time,
+                        loops=tg.loops,
+                        scheduler=tg.scheduler,
+                        duration=tg.duration,
+                    )
+                    for tg in effective_tgs
+                ]
+                for aid in aids
+            }
+            for tg in effective_tgs:
                 if tg.num_threads <= 0:
                     continue
                 shares = split_threads(tg.num_threads, weights)
                 for aid, n in shares.items():
-                    agent_thread_args[aid][f"threads_{tg.thread_group_name}"] = str(n)
+                    for ag_tg in per_agent_tgs[aid]:
+                        if (
+                            ag_tg.thread_group_name == tg.thread_group_name
+                            and ag_tg.testclass == tg.testclass
+                        ):
+                            ag_tg.num_threads = n
             logger.info(
                 f"run={run_no} script={ss.script_id} 线程拆分: "
-                f"{ {tg.thread_group_name: tg.num_threads for tg in tg_settings} }"
+                f"{ {tg.thread_group_name: tg.num_threads for tg in effective_tgs} }"
             )
+        else:
+            per_agent_tgs = {aids[0]: effective_tgs}
 
-        task_data = {
-            "run_id": run_no,
-            "scenario_script_id": ss.id,
-            "files": files,
-            "jmeter_args": jmeter_args,
-            "start_at": start_at,
-        }
-        await dispatch(run_no, aids, task_data, upload_urls, agent_thread_args)
+        # 为每个 Agent 组装 + 上传 JMX，并单独下发（保证每台执行对应线程份额）
+        for aid in aids:
+            assembled = jmx_assembler.assemble_jmx(
+                original_bytes, per_agent_tgs[aid], scenario_type
+            )
+            jmx_key = f"runs/{run_no}/{ss.id}_{aid}.jmx"
+            await storage.upload_bytes(jmx_key, assembled)
+            files = [
+                {
+                    "key": jmx_key,
+                    "save_as": save_name,
+                    "url": await storage.presigned_get(jmx_key),
+                }
+            ]
+            for df in script.data_files or []:
+                files.append(
+                    {
+                        "key": df["key"],
+                        "save_as": df["filename"],
+                        "url": await storage.presigned_get(df["key"]),
+                    }
+                )
+            # 线程参数已写入 XML，jmeter_args 仅保留场景级 -J 覆盖
+            task_data = {
+                "run_id": run_no,
+                "scenario_script_id": ss.id,
+                "files": files,
+                "jmeter_args": dict(scenario_args),
+                "start_at": start_at,
+            }
+            await dispatch(run_no, [aid], task_data, upload_urls)
 
     return {"run_no": run_no, "agent_ids": all_agent_ids}
 
