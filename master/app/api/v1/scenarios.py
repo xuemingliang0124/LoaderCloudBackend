@@ -1,11 +1,17 @@
-"""场景管理：CRUD（创建支持多脚本组合 + 线程组级设置，名称唯一）。"""
+"""场景管理：项目作用域 CRUD（创建支持多脚本组合 + 线程组级设置，名称唯一）。
+
+全部场景接口以项目为作用域，统一使用 /projects/{project_id}/scenarios 嵌套路由：
+- 项目不存在返回 3021
+- 操作具体场景时校验归属，场景不属于该项目返回 3022
+- 创建/更新场景时，引用的脚本必须属于同一项目（3022）
+"""
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_current_user
+from app.api.deps import CurrentUser, ensure_project_access, get_current_user
 from app.db.session import get_db
 from app.models.enums import RunStatus
 from app.models.run import ScenarioRun
@@ -30,6 +36,42 @@ from app.services.exceptions import BusinessError
 router = APIRouter()
 
 
+async def _get_scoped_scenario(
+    db: AsyncSession, project_id: int, scenario_id: int
+) -> Scenario:
+    """按项目作用域取场景：不存在 3013，跨项目访问 3022。"""
+    scenario = (
+        await db.execute(select(Scenario).where(Scenario.id == scenario_id))
+    ).scalar_one_or_none()
+    if scenario is None:
+        raise BusinessError("场景不存在", code=3013)
+    if scenario.project_id != project_id:
+        raise BusinessError("场景不属于指定项目", code=3022)
+    return scenario
+
+
+async def _validate_project_scripts(
+    db: AsyncSession, project_id: int, script_ids: list[int]
+) -> None:
+    """校验脚本：场景内不重复（3011）、存在（3012）且属于同一项目（3022）。"""
+    if len(script_ids) != len(set(script_ids)):
+        raise BusinessError("同一场景内脚本不可重复", code=3011)
+    if not script_ids:
+        return
+    scripts = (
+        (await db.execute(select(Script).where(Script.id.in_(script_ids))))
+        .scalars()
+        .all()
+    )
+    found_ids = {s.id for s in scripts}
+    missing = [sid for sid in script_ids if sid not in found_ids]
+    if missing:
+        raise BusinessError(f"脚本不存在: {missing}", code=3012)
+    foreign = [s.id for s in scripts if s.project_id != project_id]
+    if foreign:
+        raise BusinessError(f"脚本不属于指定项目: {foreign}", code=3022)
+
+
 def _build_scenario_out(scenario: Scenario) -> dict:
     """把 Scenario ORM（含 scripts/thread_groups/script 关联）转为响应 dict。"""
     scripts_out: list[dict] = []
@@ -52,6 +94,7 @@ def _build_scenario_out(scenario: Scenario) -> dict:
         )
     return ScenarioOut(
         id=scenario.id,
+        project_id=scenario.project_id,
         name=scenario.name,
         scenario_type=scenario.scenario_type,
         duration=scenario.duration,
@@ -61,13 +104,28 @@ def _build_scenario_out(scenario: Scenario) -> dict:
     ).model_dump(mode="json")
 
 
-@router.post("/scenarios")
+def _scenario_detail_stmt(scenario_id: int):
+    """构造回读场景及脚本/线程组关联的 select 语句（响应用）。"""
+    return (
+        select(Scenario)
+        .options(selectinload(Scenario.scripts).selectinload(ScenarioScript.script))
+        .options(
+            selectinload(Scenario.scripts).selectinload(ScenarioScript.thread_groups)
+        )
+        .where(Scenario.id == scenario_id)
+    )
+
+
+@router.post("/projects/{project_id}/scenarios")
 async def create_scenario(
+    project_id: int,
     payload: ScenarioIn,
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """创建场景：名称不可重复，支持多脚本组合，每个脚本可配置各线程组加压参数。"""
+    """在指定项目下创建场景：名称不可重复，支持多脚本组合（脚本须属于该项目）。"""
+    await ensure_project_access(db, project_id, user, "editor")
+
     # 名称唯一校验
     exists = (
         await db.execute(select(Scenario).where(Scenario.name == payload.name))
@@ -75,22 +133,12 @@ async def create_scenario(
     if exists is not None:
         raise BusinessError(f"场景名称已存在: {payload.name}", code=3010)
 
-    # 校验脚本存在性 + 去重（同一场景内同一脚本只允许出现一次）
+    # 校验脚本：去重 + 存在 + 同项目归属
     script_ids = [s.script_id for s in payload.scripts]
-    if len(script_ids) != len(set(script_ids)):
-        raise BusinessError("同一场景内脚本不可重复", code=3011)
-    if script_ids:
-        scripts = (
-            (await db.execute(select(Script).where(Script.id.in_(script_ids))))
-            .scalars()
-            .all()
-        )
-        found_ids = {s.id for s in scripts}
-        missing = [sid for sid in script_ids if sid not in found_ids]
-        if missing:
-            raise BusinessError(f"脚本不存在: {missing}", code=3012)
+    await _validate_project_scripts(db, project_id, script_ids)
 
     scenario = Scenario(
+        project_id=project_id,
         name=payload.name,
         scenario_type=payload.scenario_type,
         duration=payload.duration,
@@ -126,30 +174,22 @@ async def create_scenario(
 
     await db.commit()
     # 回读关联以构造完整响应
-    scenario = (
-        await db.execute(
-            select(Scenario)
-            .options(selectinload(Scenario.scripts).selectinload(ScenarioScript.script))
-            .options(
-                selectinload(Scenario.scripts).selectinload(
-                    ScenarioScript.thread_groups
-                )
-            )
-            .where(Scenario.id == scenario.id)
-        )
-    ).scalar_one()
+    scenario = (await db.execute(_scenario_detail_stmt(scenario.id))).scalar_one()
     return ok(_build_scenario_out(scenario))
 
 
-@router.get("/scenarios")
+@router.get("/projects/{project_id}/scenarios")
 async def list_scenarios(
+    project_id: int,
     name: str | None = Query(default=None, description="按场景名模糊查询"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    filters = []
+    """项目内场景分页列表：仅返回归属该项目的场景，支持名称模糊查询。"""
+    await ensure_project_access(db, project_id, user, "viewer")
+    filters = [Scenario.project_id == project_id]
     if name:
         filters.append(Scenario.name.like(like_pattern(name.strip()), escape="\\"))
 
@@ -179,19 +219,17 @@ async def list_scenarios(
     return ok({"total": int(total or 0), "items": items})
 
 
-@router.put("/scenarios/{scenario_id}")
+@router.put("/projects/{project_id}/scenarios/{scenario_id}")
 async def update_scenario(
+    project_id: int,
     scenario_id: int,
     payload: ScenarioUpdateIn,
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """更新场景：基础信息 + 关联脚本（全量替换，含线程组设置）。"""
-    scenario = (
-        await db.execute(select(Scenario).where(Scenario.id == scenario_id))
-    ).scalar_one_or_none()
-    if scenario is None:
-        raise BusinessError("场景不存在", code=3013)
+    """更新场景：基础信息 + 关联脚本（全量替换，含线程组设置；脚本须属于该项目）。"""
+    await ensure_project_access(db, project_id, user, "editor")
+    scenario = await _get_scoped_scenario(db, project_id, scenario_id)
 
     # 运行中/待执行的场景不允许修改，避免下发配置与落库配置不一致
     running = (
@@ -218,20 +256,9 @@ async def update_scenario(
     if dup is not None:
         raise BusinessError(f"场景名称已存在: {payload.name}", code=3010)
 
-    # 脚本去重 + 存在性校验
+    # 脚本校验：去重 + 存在 + 同项目归属
     script_ids = [s.script_id for s in payload.scripts]
-    if len(script_ids) != len(set(script_ids)):
-        raise BusinessError("同一场景内脚本不可重复", code=3011)
-    if script_ids:
-        scripts = (
-            (await db.execute(select(Script).where(Script.id.in_(script_ids))))
-            .scalars()
-            .all()
-        )
-        found_ids = {s.id for s in scripts}
-        missing = [sid for sid in script_ids if sid not in found_ids]
-        if missing:
-            raise BusinessError(f"脚本不存在: {missing}", code=3012)
+    await _validate_project_scripts(db, project_id, script_ids)
 
     # ---- 更新场景基础信息 ----
     scenario.name = payload.name
@@ -273,37 +300,24 @@ async def update_scenario(
 
     await db.commit()
     # 回读关联构造响应
-    scenario = (
-        await db.execute(
-            select(Scenario)
-            .options(selectinload(Scenario.scripts).selectinload(ScenarioScript.script))
-            .options(
-                selectinload(Scenario.scripts).selectinload(
-                    ScenarioScript.thread_groups
-                )
-            )
-            .where(Scenario.id == scenario.id)
-        )
-    ).scalar_one()
+    scenario = (await db.execute(_scenario_detail_stmt(scenario.id))).scalar_one()
     return ok(_build_scenario_out(scenario))
 
 
-@router.get("/scenarios/{scenario_id}/delete-precheck")
+@router.get("/projects/{project_id}/scenarios/{scenario_id}/delete-precheck")
 async def precheck_scenario_delete(
+    project_id: int,
     scenario_id: int,
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """删除前预检：返回运行中任务数、历史执行记录数、引用的定时任务列表。
 
     前端据此决定是否弹出确认框并发起 force=true 的强制删除；
     running_runs > 0 时无论是否 force 都不可删除（需先停止执行）。
     """
-    scenario = (
-        await db.execute(select(Scenario).where(Scenario.id == scenario_id))
-    ).scalar_one_or_none()
-    if scenario is None:
-        raise BusinessError("场景不存在", code=3013)
+    await ensure_project_access(db, project_id, user, "viewer")
+    await _get_scoped_scenario(db, project_id, scenario_id)
 
     running_runs = (
         await db.scalar(
@@ -325,15 +339,12 @@ async def precheck_scenario_delete(
         )
     ) - running_runs
     schedules = (
-        (
-            await db.execute(
-                select(ScheduleJob.id, ScheduleJob.name).where(
-                    ScheduleJob.scenario_id == scenario_id
-                )
+        await db.execute(
+            select(ScheduleJob.id, ScheduleJob.name).where(
+                ScheduleJob.scenario_id == scenario_id
             )
         )
-        .all()
-    )
+    ).all()
     return ok(
         {
             "scenario_id": scenario_id,
@@ -344,15 +355,16 @@ async def precheck_scenario_delete(
     )
 
 
-@router.delete("/scenarios/{scenario_id}")
+@router.delete("/projects/{project_id}/scenarios/{scenario_id}")
 async def delete_scenario(
+    project_id: int,
     scenario_id: int,
     force: bool = Query(
         False,
         description="强制级联删除：清理历史执行记录/结果分片/定时任务/MinIO 产物",
     ),
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """删除场景（Scenario.scripts 级联删除 scenario_script 与 scenario_script_tg）。
 
@@ -361,11 +373,8 @@ async def delete_scenario(
     APScheduler 注销）→ 场景 顺序清理；运行中任务仍拒绝（需先停止执行）。
     MinIO 产物 runs/{run_no}/ 删除失败仅告警，不影响结果。
     """
-    scenario = (
-        await db.execute(select(Scenario).where(Scenario.id == scenario_id))
-    ).scalar_one_or_none()
-    if scenario is None:
-        raise BusinessError("场景不存在", code=3013)
+    await ensure_project_access(db, project_id, user, "editor")
+    scenario = await _get_scoped_scenario(db, project_id, scenario_id)
 
     # 存在未结束的执行任务时不允许删除（force 也不例外，必须先停止执行）
     running = (
@@ -451,6 +460,7 @@ async def delete_scenario(
     return ok(
         {
             "id": scenario_id,
+            "project_id": project_id,
             "deleted": True,
             "force": force,
             "removed_runs": len(run_nos),

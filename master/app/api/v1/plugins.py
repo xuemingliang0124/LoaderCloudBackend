@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import CurrentUser, get_current_user
 from app.db.session import get_db
 from app.models.agent_plugin import AgentPlugin
 from app.models.plugin import JmeterPlugin
@@ -37,7 +37,7 @@ async def upload_plugin(
     version: str = Form(default="v1"),
     description: str = Form(default=""),
     db: AsyncSession = Depends(get_db),
-    user: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
     """上传 JMeter 第三方插件 jar 到全局插件池。
 
@@ -76,7 +76,7 @@ async def upload_plugin(
         sha256=sha,
         size=len(data),
         description=description,
-        created_by=user,
+        created_by=user.username,
     )
     db.add(plugin)
     await db.flush()  # 先拿 id 组装 MinIO key

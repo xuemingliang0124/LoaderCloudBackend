@@ -17,7 +17,7 @@ async def login(payload: LoginIn, db: AsyncSession = Depends(get_db)) -> dict:
     user = await user_service.authenticate(db, payload.username, payload.password)
     return ok(
         {
-            "token": create_access_token(user.username),
+            "token": create_access_token(user.username, user.role),
             "username": user.username,
             "role": user.role,
         }

@@ -1,5 +1,8 @@
 """脚本管理：JMX 上传（MinIO 归档）+ 列表。
 
+全部脚本接口以项目为作用域，统一使用 /projects/{project_id}/scripts 嵌套路由：
+- 项目不存在返回 3021
+- 操作具体脚本时校验归属，脚本不属于该项目返回 3022
 插件管理已迁移到 /api/v1/plugins 端点（全局插件池），
 脚本上传不再带 plugin_files 参数。
 """
@@ -11,7 +14,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import CurrentUser, ensure_project_access, get_current_user
 from app.db.session import get_db
 from app.models.script import Script
 from app.schemas import ScriptOut
@@ -26,8 +29,23 @@ router = APIRouter()
 _DATA_FILE_EXTS = (".csv", ".txt", ".dat", ".tsv")
 
 
-@router.post("/scripts")
+async def _get_scoped_script(
+    db: AsyncSession, project_id: int, script_id: int
+) -> Script:
+    """按项目作用域取脚本：不存在 3007，跨项目访问 3022。"""
+    script = (
+        await db.execute(select(Script).where(Script.id == script_id))
+    ).scalar_one_or_none()
+    if script is None:
+        raise BusinessError("脚本不存在", code=3007)
+    if script.project_id != project_id:
+        raise BusinessError("脚本不属于指定项目", code=3022)
+    return script
+
+
+@router.post("/projects/{project_id}/scripts")
 async def upload_script(
+    project_id: int,
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
     version: str = Form(default="v1"),
@@ -35,15 +53,16 @@ async def upload_script(
     params: str = Form(default="[]"),
     data_files: list[UploadFile] = File(default=[]),
     db: AsyncSession = Depends(get_db),
-    user: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """上传 JMX 脚本及关联的数据文件。
+    """在指定项目下上传 JMX 脚本及关联的数据文件。
 
     params 为占位符定义 JSON：[{"key","default","desc"}]。
     data_files 为 JMX 引用的 CSV 等数据文件，文件名必须与 JMX 内引用一致。
     第三方插件不再随脚本上传：改用 POST /api/v1/plugins 上传到全局插件池，
     Agent 启动/在线推送时由 PluginSyncer 对齐 plugin_dir。
     """
+    await ensure_project_access(db, project_id, user, "editor")
     filename = file.filename or ""
     if not filename.lower().endswith(".jmx"):
         raise BusinessError("仅支持上传 .jmx 文件", code=3001)
@@ -77,11 +96,12 @@ async def upload_script(
         raise BusinessError(f"缺少数据文件: {', '.join(missing)}", code=3006)
 
     script = Script(
+        project_id=project_id,
         name=name or filename.rsplit(".", 1)[0],
         version=version,
         params=param_list,
         description=description,
-        created_by=user,
+        created_by=user.username,
     )
     db.add(script)
     await db.flush()  # 先拿 id 组装 MinIO key
@@ -104,15 +124,18 @@ async def upload_script(
     return ok(ScriptOut.model_validate(script).model_dump(mode="json"))
 
 
-@router.get("/scripts")
+@router.get("/projects/{project_id}/scripts")
 async def list_scripts(
+    project_id: int,
     name: str | None = Query(default=None, description="按脚本名模糊查询"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    filters = []
+    """项目内脚本分页列表：仅返回归属该项目的脚本，支持名称模糊查询。"""
+    await ensure_project_access(db, project_id, user, "viewer")
+    filters = [Script.project_id == project_id]
     if name:
         filters.append(Script.name.like(like_pattern(name.strip()), escape="\\"))
 
@@ -134,29 +157,27 @@ async def list_scripts(
     return ok({"total": int(total or 0), "items": items})
 
 
-@router.put("/scripts/{script_id}/jmx")
+@router.put("/projects/{project_id}/scripts/{script_id}/jmx")
 async def replace_script_jmx(
+    project_id: int,
     script_id: int,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """上传新 JMX 替换脚本文件。
+    """在指定项目下上传新 JMX 替换脚本文件。
 
     上传前比对新旧文件的启用线程组（名称 + 类型），必须完全一致才允许替换，
     否则返回失败并给出差异明细（场景线程组设置按名称落库，标识变化会导致
     设置失效）。线程数/rampUp/循环/持续时间等参数允许不同，执行时由场景设置覆盖。
     替换在原 MinIO 对象上覆盖，file_key、数据文件与场景关联均不变。
     """
+    await ensure_project_access(db, project_id, user, "editor")
     filename = file.filename or ""
     if not filename.lower().endswith(".jmx"):
         raise BusinessError("仅支持上传 .jmx 文件", code=3001)
 
-    script = (
-        await db.execute(select(Script).where(Script.id == script_id))
-    ).scalar_one_or_none()
-    if script is None:
-        raise BusinessError("脚本不存在", code=3007)
+    script = await _get_scoped_script(db, project_id, script_id)
     if not script.file_key:
         raise BusinessError("原脚本缺少 JMX 文件，无法替换", code=3008)
 
@@ -178,23 +199,21 @@ async def replace_script_jmx(
     return ok(ScriptOut.model_validate(script).model_dump(mode="json"))
 
 
-@router.delete("/scripts/{script_id}")
+@router.delete("/projects/{project_id}/scripts/{script_id}")
 async def delete_script(
+    project_id: int,
     script_id: int,
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """删除脚本：校验场景引用 → 删 jmeter_script → 清理 MinIO 的 JMX 与参数文件。
+    """删除项目内脚本：校验归属 → 校验场景引用 → 删 jmeter_script → 清理 MinIO。
 
     scenario_script.script_id 外键没有 cascade，被场景引用时拒绝删除，
     需先在场景中移除该脚本（否则直接删会触发外键 1451）。
     MinIO 对象在删库后清理，失败仅告警不阻断，残留对象由运维定期清理。
     """
-    script = (
-        await db.execute(select(Script).where(Script.id == script_id))
-    ).scalar_one_or_none()
-    if script is None:
-        raise BusinessError("脚本不存在", code=3007)
+    await ensure_project_access(db, project_id, user, "editor")
+    script = await _get_scoped_script(db, project_id, script_id)
 
     # 删库前留档所有对象 key（JMX + 参数文件）
     object_keys = [script.file_key] if script.file_key else []
@@ -238,25 +257,23 @@ async def delete_script(
 
             logger.warning(f"脚本 {script_id} MinIO 对象删除失败 ({key}): {exc}")
 
-    return ok({"id": script_id, "deleted": True})
+    return ok({"id": script_id, "project_id": project_id, "deleted": True})
 
 
-@router.get("/scripts/{script_id}/thread-groups")
+@router.get("/projects/{project_id}/scripts/{script_id}/thread-groups")
 async def get_thread_groups(
+    project_id: int,
     script_id: int,
     db: AsyncSession = Depends(get_db),
-    _: str = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """扫描脚本 JMX，返回线程组参数（前端展示与修改用）。
+    """扫描项目内脚本 JMX，返回线程组参数（前端展示与修改用）。
 
     逐层校验 enabled，禁用链路下的线程组不返回；线程组参数中的用户变量
     引用已按"线程组内变量 > 全局变量"作用域解析，无法静态解析的字段取 0。
     """
-    script = (
-        await db.execute(select(Script).where(Script.id == script_id))
-    ).scalar_one_or_none()
-    if script is None:
-        raise BusinessError("脚本不存在", code=3007)
+    await ensure_project_access(db, project_id, user, "viewer")
+    script = await _get_scoped_script(db, project_id, script_id)
     jmx_bytes = await storage.get_object_bytes(script.file_key)
     result = jmx_scanner.scan_jmx(jmx_bytes)
     return ok(JmxScanOut(**dataclasses.asdict(result)).model_dump(mode="json"))

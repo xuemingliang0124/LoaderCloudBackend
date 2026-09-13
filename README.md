@@ -10,7 +10,7 @@ JMX 静态扫描/替换、多脚本场景（脚本级选机 + 线程组级加压
 ```
 master/    控制面：FastAPI + SQLAlchemy 2.0 async + APScheduler + ES/MinIO
   app/
-    api/v1/      REST 端点（auth/agents/scripts/plugins/scenarios/runs/schedules/metrics）
+    api/v1/      REST 端点（auth/agents/projects/scripts/plugins/scenarios/runs/schedules/metrics）
     services/    业务逻辑：orchestrator 编排 / jmx_scanner / jmx_assembler /
                  jmx_checker / plugin_sync / scheduler / es_client / storage
     models/      SQLAlchemy ORM，一表一文件；schemas/ Pydantic 契约
@@ -78,30 +78,44 @@ uvicorn app.main:app --reload
 | `POST /api/v1/agents/register` | Agent 启动按宿主机 IP 注册/领取固定 agent_id，返回 expected_plugins 清单 |
 | `GET /api/v1/agents` | 压力机列表（分页、关键字、在线状态过滤） |
 | `WS /ws/agent` | Agent 控制通道（注册/心跳/任务/指令/指标） |
-| `POST /api/v1/scripts` | 上传 JMX（multipart），可带数据文件（csv/txt/dat/tsv）与 params 占位符定义 |
-| `GET /api/v1/scripts` | 脚本列表（分页、名称模糊查询） |
-| `GET /api/v1/scripts/{id}/thread-groups` | 静态扫描 JMX，返回启用线程组及加压参数（前端配置场景用） |
-| `PUT /api/v1/scripts/{id}/jmx` | 替换 JMX：新旧启用线程组（名称+类型）必须一致，否则拒绝（3009） |
-| `DELETE /api/v1/scripts/{id}` | 删除脚本：被场景引用时拒绝（3010），随后清理 MinIO 对象 |
+| `POST /api/v1/projects` | 新建项目（名称唯一，重名拒绝 3020；创建者同事务自动成为 owner） |
+| `GET /api/v1/projects` | 项目列表（分页、名称模糊查询） |
+| `POST /api/v1/projects/{project_id}/members` | 项目成员授权（owner+，admin 直通）：目标用户不存在 3035、重复授权 3032 |
+| `GET /api/v1/projects/{project_id}/members` | 成员列表（viewer+，分页、用户名模糊查询） |
+| `PUT /api/v1/projects/{project_id}/members/{username}` | 变更成员角色（owner+）：成员不存在 3033，创建者不可降级/末位 owner 不可降级 3034 |
+| `DELETE /api/v1/projects/{project_id}/members/{username}` | 移除成员（owner+）：创建者不可移除/末位 owner 不可移除 3034，成员不存在 3033 |
+| `POST /api/v1/projects/{project_id}/scripts` | 在项目下上传 JMX（multipart），可带数据文件（csv/txt/dat/tsv）与 params 占位符定义；项目不存在 3021 |
+| `GET /api/v1/projects/{project_id}/scripts` | 项目内脚本列表（分页、名称模糊查询） |
+| `GET /api/v1/projects/{project_id}/scripts/{id}/thread-groups` | 静态扫描 JMX，返回启用线程组及加压参数（前端配置场景用）；跨项目访问 3022 |
+| `PUT /api/v1/projects/{project_id}/scripts/{id}/jmx` | 替换 JMX：新旧启用线程组（名称+类型）必须一致，否则拒绝（3009） |
+| `DELETE /api/v1/projects/{project_id}/scripts/{id}` | 删除脚本：跨项目 3022；被场景引用时拒绝（3010），随后清理 MinIO 对象 |
 | `POST/GET /api/v1/plugins` | 全局插件池：jar 上传（sha256 内容去重）/列表 |
 | `GET/PATCH /api/v1/plugins/{id}` | 详情 / 启用禁用、改描述（在线 Agent 联动 install/remove 推送） |
 | `DELETE /api/v1/plugins/{id}` | 删除：推 remove → 清 agent_plugin → 删库 → 删 MinIO 对象 |
 | `POST /api/v1/plugins/{id}/sync` | 手动触发对在线 Agent 推送同步 |
-| `POST /api/v1/scenarios` | 创建场景：多脚本组合 + 脚本级选机（agent_tags/agent_count）+ 线程组级参数 |
-| `GET /api/v1/scenarios` | 场景列表（分页、名称模糊查询） |
-| `PUT /api/v1/scenarios/{id}` | 修改场景：基础信息 + 脚本关联事务内全量替换；有未结束任务时拒绝（3014） |
-| `GET /api/v1/scenarios/{id}/delete-precheck` | 删除预检：返回 running_runs / history_runs / schedule_jobs |
-| `DELETE /api/v1/scenarios/{id}?force=` | 严格模式默认拒绝（3014 运行中 / 3015 定时引用 / 3016 历史记录）；force=true 级联删除并清理 MinIO 产物 |
-| `POST /api/v1/runs` | 触发执行（自动选机或指定 agent_ids） |
-| `GET /api/v1/runs` | 执行记录列表（分页） |
-| `POST /api/v1/runs/{run_no}/stop` | 停止执行（先置 STOPPING，收齐 Agent 回报或看门狗超时才置 STOPPED） |
-| `WS /ws/runs/{run_no}?token=` | 前端实时通道：指标批次/状态 fan-out，替代轮询 ES |
-| `GET /api/v1/metrics/timeseries` | ES 按 label 聚合的时间序列曲线 |
-| `POST/GET /api/v1/schedules` | 定时场景（标准 5 段 crontab），支持名称/启用状态过滤 |
-| `POST /api/v1/schedules/{id}/toggle` | 定时任务启停（联动 APScheduler 注册/注销） |
+| `POST /api/v1/projects/{project_id}/scenarios` | 在项目下创建场景：多脚本组合 + 脚本级选机（agent_tags/agent_count）+ 线程组级参数；脚本须属于该项目（3022），项目不存在 3021 |
+| `GET /api/v1/projects/{project_id}/scenarios` | 项目内场景列表（分页、名称模糊查询） |
+| `PUT /api/v1/projects/{project_id}/scenarios/{id}` | 修改场景：基础信息 + 脚本关联事务内全量替换；跨项目 3022，有未结束任务时拒绝（3014） |
+| `GET /api/v1/projects/{project_id}/scenarios/{id}/delete-precheck` | 删除预检：返回 running_runs / history_runs / schedule_jobs |
+| `DELETE /api/v1/projects/{project_id}/scenarios/{id}?force=` | 跨项目 3022；严格模式默认拒绝（3014 运行中 / 3015 定时引用 / 3016 历史记录）；force=true 级联删除并清理 MinIO 产物 |
+| `POST /api/v1/projects/{project_id}/runs` | 在项目下触发执行（场景须属于该项目 3013/3022；自动选机或指定 agent_ids） |
+| `GET /api/v1/projects/{project_id}/runs` | 项目内执行记录列表（分页，经场景归属过滤） |
+| `POST /api/v1/projects/{project_id}/runs/{run_no}/stop` | 停止执行（记录须属于该项目 2003/3022；先置 STOPPING，收齐 Agent 回报或看门狗超时才置 STOPPED） |
+| `WS /ws/runs/{run_no}?token=` | 前端实时通道：指标批次/状态 fan-out，替代轮询 ES；仅项目成员（viewer+）可订阅，无权/记录不存在一律 1008 拒绝 |
+| `GET /api/v1/metrics/timeseries` | ES 按 label 聚合的时间序列曲线；仅项目成员（viewer+）可查（3030），记录不存在 2003 |
+| `POST/GET /api/v1/projects/{project_id}/schedules` | 项目内定时场景（标准 5 段 crontab；场景须属于该项目 3013/3022），支持名称/启用状态过滤 |
+| `POST /api/v1/projects/{project_id}/schedules/{id}/toggle` | 定时任务启停（任务须属于该项目 4002/3022；联动 APScheduler 注册/注销） |
 
 ## 领域约定
 
+- **项目级权限**：双层角色——`sys_user.role` 全局（admin 超管仅校验项目存在）+
+  `project_member.role` 项目内 owner/editor/viewer（中文：项目管理员/编辑者/观察者；
+  JWT 携带全局 role，成员关系不进 token 保证吊销即时生效）。所有 `/projects/{project_id}/...`
+  接口先过 `ensure_project_access`：3021 项目不存在 → 3030 非成员 → 3031 角色不足
+  （读接口 viewer+，写接口 editor+，成员管理 owner+）；项目列表非 admin 仅返回已授权
+  项目；run 指标与 WS 订阅按 run_no → 场景 → 项目 校验（viewer+）。成员管理错误码：
+  3032 已是成员 / 3033 成员不存在 / 3034 创建者或末位 owner 保护 / 3035 目标用户不存在；
+  非法角色由 Pydantic 枚举校验直接 422。
 - **JMX 参数化**：脚本内占位符 `${__P(key, default)}`，场景存 `param_overrides`
   key-value 覆盖，执行时拼 `-Jkey=value`，不直接改原始 XML。
 - **场景类型**：单交易基准 / 单交易负载 / 混合场景 / 稳定性，四选一；
@@ -136,17 +150,20 @@ uvicorn app.main:app --reload
 ### P2+ — 脚本与场景管理闭环
 
 - [x] 脚本数据文件（csv/txt/dat/tsv）随 JMX 上传：扩展名/重名校验 + 按 JMX 内引用做缺失校验（3003/3004/3006）
-- [x] JMX 线程组静态扫描：逐层 enabled 链路过滤、用户变量按"线程组内 > 全局"作用域解析 — `services/jmx_scanner.py`，`GET /scripts/{id}/thread-groups`
-- [x] JMX 文件替换：新旧启用线程组按"名称 + 类型"比对一致才允许覆盖（3009），线程数/rampUp/循环等差异由场景设置在执行期覆盖 — `PUT /scripts/{id}/jmx`
+- [x] JMX 线程组静态扫描：逐层 enabled 链路过滤、用户变量按"线程组内 > 全局"作用域解析 — `services/jmx_scanner.py`，`GET /projects/{project_id}/scripts/{id}/thread-groups`
+- [x] JMX 文件替换：新旧启用线程组按"名称 + 类型"比对一致才允许覆盖（3009），线程数/rampUp/循环等差异由场景设置在执行期覆盖 — `PUT /projects/{project_id}/scripts/{id}/jmx`
 - [x] 脚本删除：场景引用预检（3010）+ MinIO JMX 与数据文件物理清理（失败仅告警）
 - [x] 多脚本场景：`scenario_script`（脚本顺序、agent_tags OR 选机、agent_count）+ `scenario_script_tg`（线程组级 num_threads/ramp_time/loops/scheduler/duration），场景-脚本关联全量替换
 - [x] 场景类型四枚举（单交易基准/单交易负载/混合场景/稳定性）+ 场景级 duration（Pydantic 与 ORM Enum 双层约束）
-- [x] 场景修改接口 `PUT /scenarios/{id}`：存在 PENDING/RUNNING/STOPPING 任务时拒绝（3014），脚本关联在事务内删旧重建
+- [x] 场景修改接口 `PUT /projects/{project_id}/scenarios/{id}`：存在 PENDING/RUNNING/STOPPING 任务时拒绝（3014），脚本关联在事务内删旧重建
 - [x] 场景删除预检 + `force=true` 级联删除：run_agent_result → scenario_run → 定时任务（APScheduler remove_job）→ scenario，事务提交后 best-effort 清理 MinIO `runs/{run_no}/`（3014/3015/3016）
 - [x] 执行期 JMX 组装：按场景设置改写线程组参数，单交易基准开启 TestPlan `serialize_threadgroups` — `services/jmx_assembler.py`
 - [x] Agent 按宿主机 IP 注册固定 agent_id（UDP connect 探测网卡，Master 不可达指数退避重试），显式 `AGENT_ID` 配置优先 — `agent/pt_agent/identity.py` + `POST /agents/register`
 - [x] 插件策略收敛为纯全局池：取消脚本-插件绑定检查，上传 sha256 去重，删除联动 MinIO 物理删除；启动期一次性迁移历史脚本级插件
 - [x] 列表接口统一分页 + 关键字模糊查询（agents/scripts/scenarios/schedules）
+- [x] 项目作用域：项目 CRUD（POST/GET /api/v1/projects）；脚本与场景全部接口收敛为 `/projects/{project_id}/...` 嵌套路由（3021 项目不存在 / 3022 跨项目访问），场景引用脚本须同项目，历史数据迁移回填「默认项目」
+- [x] 项目级权限管理：`project_member` 表（迁移 20260913d1 幂等建表并回填 owner）+ JWT 携带全局 role（旧 token 强制重登）+ `ensure_project_access` 收口全部项目接口（3030 非成员 / 3031 角色不足，admin 直通）；建项目自动 owner、项目列表按成员过滤、`/metrics/timeseries` 与 `/ws/runs/{run_no}` 按 run→场景→项目 校验成员可见性
+- [x] 项目成员管理 API：授权/列表/改角色/移除（owner+，admin 直通），角色项目管理员/编辑者/观察者（DB 存英文、API 出中文）；3032 重复授权 / 3033 成员不存在 / 3034 创建者与末位 owner 保护 / 3035 目标用户不存在
 - [x] 生产压力机离线部署 compose：预构建镜像分发、host 网络、nofile/端口范围调优 — `deploy/docker-compose.agent-prod.yml`
 - [x] 平台侧 compose 增加 Kibana（http://localhost:5601）
 

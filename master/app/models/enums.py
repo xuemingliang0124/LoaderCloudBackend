@@ -43,3 +43,11 @@ class ScenarioType(str, Enum):
     SINGLE_LOAD = "单交易负载"
     MIXED = "混合场景"
     STABILITY = "稳定性"
+
+
+class ProjectRole(str, Enum):
+    """项目成员角色，三选一。DB 存英文 name 小写（owner/editor/viewer），API 收/出中文。"""
+
+    OWNER = "项目管理员"
+    EDITOR = "编辑者"
+    VIEWER = "观察者"

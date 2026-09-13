@@ -20,19 +20,28 @@ def verify_password(raw: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(subject: str) -> str:
+def create_access_token(subject: str, role: str) -> str:
+    """签发 JWT：sub=用户名，role=全局角色（随 token 携带，避免每次请求查库）。"""
     settings = get_settings()
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
-    payload = {"sub": subject, "exp": expire}
+    payload = {"sub": subject, "role": role, "exp": expire}
     return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
 
 
-def decode_token(token: str) -> str | None:
+def decode_token_payload(token: str) -> dict | None:
+    """解码完整 payload；非法/过期返回 None。"""
     try:
         settings = get_settings()
-        payload = jwt.decode(
+        return jwt.decode(
             token, settings.secret_key, algorithms=[settings.jwt_algorithm]
         )
-        return payload.get("sub")
     except JWTError:
         return None
+
+
+def decode_token(token: str) -> str | None:
+    """取用户名；缺 role claim 的旧 token 一律拒绝，强制重新登录。"""
+    payload = decode_token_payload(token)
+    if payload is None or not payload.get("role"):
+        return None
+    return payload.get("sub")

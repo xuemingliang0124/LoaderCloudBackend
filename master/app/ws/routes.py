@@ -10,8 +10,11 @@
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app.core.security import decode_token
+from app.api.deps import CurrentUser, ensure_run_visible
+from app.core.security import decode_token_payload
+from app.db.session import SessionLocal
 from app.services import agent_registry
+from app.services.exceptions import BusinessError
 from app.ws.hub import frontend_hub
 from app.ws.manager import agent_manager
 from app.ws.protocol import FE_MSG_SUBSCRIBED, Envelope
@@ -52,10 +55,22 @@ async def agent_endpoint(
 async def run_stream_endpoint(
     websocket: WebSocket, run_no: str, token: str = ""
 ) -> None:
-    """前端订阅某执行的实时指标/状态。JWT 走 query 参数；无效直接拒握手。"""
-    if not decode_token(token):
+    """前端订阅某执行的实时指标/状态。JWT 走 query 参数。
+
+    握手校验：token 有效 + 执行记录可见性（run_no → 场景 → 项目成员，
+    viewer 及以上）；无效或无权一律以 1008 拒绝，不泄露具体原因。
+    """
+    payload = decode_token_payload(token)
+    if payload is None or not payload.get("sub") or not payload.get("role"):
         await websocket.close(code=1008)
         return
+    user = CurrentUser(username=payload["sub"], role=payload["role"])
+    async with SessionLocal() as db:
+        try:
+            await ensure_run_visible(db, run_no, user)
+        except BusinessError:
+            await websocket.close(code=1008)
+            return
     await websocket.accept()
     await frontend_hub.subscribe(run_no, websocket)
     await websocket.send_json(

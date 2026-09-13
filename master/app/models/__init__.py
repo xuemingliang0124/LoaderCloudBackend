@@ -6,11 +6,14 @@ from app.models.base import Base, IntPkMixin, TimestampMixin
 from app.models.enums import (
     AgentPhase,
     AgentStatus,
+    ProjectRole,
     RunStatus,
     RunTrigger,
     ScenarioType,
 )
 from app.models.plugin import JmeterPlugin
+from app.models.project import Project
+from app.models.project_member import ProjectMember
 from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
 from app.models.schedule import ScheduleJob
@@ -28,6 +31,9 @@ __all__ = [
     "Base",
     "IntPkMixin",
     "JmeterPlugin",
+    "Project",
+    "ProjectMember",
+    "ProjectRole",
     "RunAgentResult",
     "RunStatus",
     "RunTrigger",

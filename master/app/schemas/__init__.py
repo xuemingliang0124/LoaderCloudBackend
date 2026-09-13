@@ -1,10 +1,10 @@
-"""请求/响应模型：auth / agent / run / script / scenario / schedule。"""
+"""请求/响应模型：auth / agent / run / script / scenario / schedule / project / member。"""
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.models.enums import ScenarioType
+from app.models.enums import ProjectRole, ScenarioType
 
 
 class LoginIn(BaseModel):
@@ -77,6 +77,7 @@ class ScriptOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    project_id: int
     name: str
     version: str
     file_key: str
@@ -223,6 +224,7 @@ class ScenarioOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    project_id: int
     name: str
     scenario_type: ScenarioType
     duration: int
@@ -247,3 +249,78 @@ class ScheduleOut(BaseModel):
     cron: str
     enabled: bool
     last_run_no: str | None
+
+
+class ProjectIn(BaseModel):
+    """新建项目请求。"""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "电商交易链路压测",
+                "description": "覆盖下单/支付/库存核心链路的性能测试项目",
+            }
+        }
+    )
+
+    name: str = Field(..., min_length=1, max_length=128, examples=["电商交易链路压测"])
+    description: str = Field(default="", max_length=512, examples=["核心链路性能测试"])
+
+    @field_validator("name")
+    @classmethod
+    def _strip_and_require_name(cls, v: str) -> str:
+        # 统一去除首尾空白，纯空白名称视为非法（422）
+        v = v.strip()
+        if not v:
+            raise ValueError("项目名称不能为空")
+        return v
+
+
+class ProjectOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemberGrantIn(BaseModel):
+    """项目成员授权请求。"""
+
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"username": "zhangsan", "role": "编辑者"}}
+    )
+
+    username: str = Field(..., min_length=1, max_length=64)
+    role: ProjectRole
+
+    @field_validator("username")
+    @classmethod
+    def _strip_username(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("用户名不能为空")
+        return v
+
+
+class MemberRoleUpdateIn(BaseModel):
+    """项目成员角色变更请求（非法角色由枚举校验直接 422）。"""
+
+    role: ProjectRole
+
+
+class MemberOut(BaseModel):
+    """项目成员响应：role 输出中文角色名。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    username: str
+    role: str  # 中文角色名（项目管理员/编辑者/观察者）
+    granted_by: str
+    created_at: datetime
+    updated_at: datetime

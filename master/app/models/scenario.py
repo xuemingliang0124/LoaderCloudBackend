@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Enum as SAEnum, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Enum as SAEnum,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, IntPkMixin, TimestampMixin
@@ -23,6 +31,12 @@ class Scenario(Base, IntPkMixin, TimestampMixin):
     __tablename__ = "test_scenario"
     __table_args__ = (UniqueConstraint("name", name="uq_test_scenario_name"),)
 
+    # 所属项目：场景为项目内资产，所有场景管理接口均按项目作用域访问
+    project_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("test_project.id", name="fk_test_scenario_project"),
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(128), index=True)
     # 场景类型，四选一；DB 存枚举 name，API 层出中文 value（与 RunStatus 口径一致）
     scenario_type: Mapped[ScenarioType] = mapped_column(
