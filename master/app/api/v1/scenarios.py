@@ -4,6 +4,8 @@
 - 项目不存在返回 3021
 - 操作具体场景时校验归属，场景不属于该项目返回 3022
 - 创建/更新场景时，引用的脚本必须属于同一项目（3022）
+- 线程组级 scheduler/duration 不再由接口接收：落库统一 scheduler=True，
+  duration 用场景级运行时间覆盖（单交易基准由执行期固定参数另行处理）
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -39,9 +41,17 @@ router = APIRouter()
 async def _get_scoped_scenario(
     db: AsyncSession, project_id: int, scenario_id: int
 ) -> Scenario:
-    """按项目作用域取场景：不存在 3013，跨项目访问 3022。"""
+    """按项目作用域取场景：不存在 3013，跨项目访问 3022。
+
+    预加载 scripts 关联：update 场景需遍历旧关联，异步会话下懒加载会
+    抛 MissingGreenlet。
+    """
     scenario = (
-        await db.execute(select(Scenario).where(Scenario.id == scenario_id))
+        await db.execute(
+            select(Scenario)
+            .options(selectinload(Scenario.scripts))
+            .where(Scenario.id == scenario_id)
+        )
     ).scalar_one_or_none()
     if scenario is None:
         raise BusinessError("场景不存在", code=3013)
@@ -159,16 +169,18 @@ async def create_scenario(
         db.add(ss)
         await db.flush()
         for tg in s.thread_groups:
+            # 调度器统一开启，运行时长由场景级 duration 覆盖线程组级设置
             db.add(
                 ScenarioScriptTG(
                     scenario_script_id=ss.id,
                     thread_group_name=tg.thread_group_name,
                     testclass=tg.testclass,
+                    enabled=tg.enabled,
                     num_threads=tg.num_threads,
                     ramp_time=tg.ramp_time,
-                    loops=tg.loops,
-                    scheduler=tg.scheduler,
-                    duration=tg.duration,
+                    tps=tg.tps,
+                    scheduler=True,
+                    duration=payload.duration,
                 )
             )
 
@@ -217,6 +229,25 @@ async def list_scenarios(
     )
     items = [_build_scenario_out(r) for r in rows]
     return ok({"total": int(total or 0), "items": items})
+
+
+@router.get("/projects/{project_id}/scenarios/{scenario_id}")
+async def get_scenario(
+    project_id: int,
+    scenario_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """场景详情：基础信息 + 关联脚本（名称/选机标签/数量）及线程组级加压参数。"""
+    await ensure_project_access(db, project_id, user, "viewer")
+    scenario = (
+        await db.execute(_scenario_detail_stmt(scenario_id))
+    ).scalar_one_or_none()
+    if scenario is None:
+        raise BusinessError("场景不存在", code=3013)
+    if scenario.project_id != project_id:
+        raise BusinessError("场景不属于指定项目", code=3022)
+    return ok(_build_scenario_out(scenario))
 
 
 @router.put("/projects/{project_id}/scenarios/{scenario_id}")
@@ -268,12 +299,12 @@ async def update_scenario(
     scenario.description = payload.description
 
     # ---- 全量替换脚本关联 ----
-    # 删除旧关联：cascade="all, delete-orphan" 会连带删 scenario_script_tg
-    for old_ss in list(scenario.scripts):
-        db.delete(old_ss)
+    # 关系集合层面清空：delete-orphan 级联删除旧 scenario_script 及其
+    # thread_groups（直接 db.delete 绕过关系集合会让回读命中身份映射旧对象）
+    scenario.scripts.clear()
     await db.flush()
 
-    # 重建关联
+    # 重建关联（append 同步关系集合，保证回读响应与 DB 一致）
     for idx, s in enumerate(payload.scripts):
         ss = ScenarioScript(
             scenario_id=scenario.id,
@@ -282,19 +313,21 @@ async def update_scenario(
             agent_tags=s.agent_tags,
             agent_count=s.agent_count,
         )
-        db.add(ss)
+        scenario.scripts.append(ss)
         await db.flush()
         for tg in s.thread_groups:
+            # 调度器统一开启，运行时长由场景级 duration 覆盖线程组级设置
             db.add(
                 ScenarioScriptTG(
                     scenario_script_id=ss.id,
                     thread_group_name=tg.thread_group_name,
                     testclass=tg.testclass,
+                    enabled=tg.enabled,
                     num_threads=tg.num_threads,
                     ramp_time=tg.ramp_time,
-                    loops=tg.loops,
-                    scheduler=tg.scheduler,
-                    duration=tg.duration,
+                    tps=tg.tps,
+                    scheduler=True,
+                    duration=payload.duration,
                 )
             )
 

@@ -1,8 +1,10 @@
 """场景内脚本线程组设置：保存每个线程组在场景下的加压参数。
 
-执行时转为 -J 参数注入（脚本内线程组属性需用 ${__P(key, default)} 引用），
-约定 key：threads_<线程组名>、ramp_up_<线程组名>、loops_<线程组名>、
-duration_<线程组名>。
+执行时由 jmx_assembler 直接改写执行用 JMX 的 XML（原始脚本不动）：
+enabled 写入线程组节点启用状态，num_threads / ramp_time / scheduler /
+duration 写入线程组属性，tps ×60 换算为 TPM 写入线程组内常量吞吐量定时器。
+循环次数不再落库：非基准场景统一无限循环（场景时长收口），
+单交易基准固定 100 次（jmx_assembler 内常量）。
 """
 
 from __future__ import annotations
@@ -31,11 +33,18 @@ class ScenarioScriptTG(Base, IntPkMixin, TimestampMixin):
     thread_group_name: Mapped[str] = mapped_column(String(128))
     # 线程组类型：ThreadGroup / SetUpThreadGroup / TearDownThreadGroup
     testclass: Mapped[str] = mapped_column(String(64), default="ThreadGroup")
+    # 场景级启用开关：组装时写入线程组节点 enabled 属性；false 时整组不执行
+    # （初始值取脚本扫描结果，可在场景设置中切换）
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     num_threads: Mapped[int] = mapped_column(Integer, default=1)
     ramp_time: Mapped[int] = mapped_column(Integer, default=0)
-    loops: Mapped[int] = mapped_column(Integer, default=1)  # -1 表示无限循环
-    scheduler: Mapped[bool] = mapped_column(Boolean, default=False)
-    duration: Mapped[int] = mapped_column(Integer, default=0)  # scheduler=false 时为 0
+    # 集群目标 TPS（每秒样本数），0 表示不限速；多机执行时按 CPU 权重均摊
+    # （允许小数份额），执行期份额 ×60 写入常量吞吐量定时器
+    tps: Mapped[int] = mapped_column(Integer, default=0)
+    scheduler: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 落库固定 scheduler=True，duration 取场景级运行时间；
+    # 单交易基准执行期固定参数另行覆盖（scheduler=False、duration=0）
+    duration: Mapped[int] = mapped_column(Integer, default=0)
 
     scenario_script: Mapped[ScenarioScript] = relationship(
         back_populates="thread_groups"

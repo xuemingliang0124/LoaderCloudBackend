@@ -43,7 +43,8 @@ class Scenario(Base, IntPkMixin, TimestampMixin):
         SAEnum(ScenarioType, length=32, native_enum=False),
         default=ScenarioType.SINGLE_BASELINE,
     )
-    # 场景级运行时间（秒），调度/展示用；实际压测时长由各线程组 scheduler+duration 决定
+    # 场景级运行时间（秒）：非单交易基准场景统一覆盖各线程组的 duration；
+    # 单交易基准执行期走固定参数（循环 100、关闭调度器），本字段不生效
     duration: Mapped[int] = mapped_column(Integer, default=0)
     # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数
     param_overrides: Mapped[dict | None] = mapped_column(JSON, default=dict)

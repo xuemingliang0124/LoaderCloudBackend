@@ -87,15 +87,24 @@ class ScriptOut(BaseModel):
 
 
 class ThreadGroupSettingIn(BaseModel):
-    """场景内单个线程组的加压参数（创建/更新场景时传入）。"""
+    """场景内单个线程组的加压参数（创建/更新场景时传入）。
+
+    调度器与运行时长不再由线程组级传入：落库统一 scheduler=True，
+    duration 使用场景级运行时间（见 scenarios.py 存储逻辑）。
+    循环次数不再可配：非基准场景执行期统一无限循环（由场景时长收口），
+    单交易基准固定 100 次（见 jmx_assembler）。
+
+    tps：目标吞吐量（每秒样本数），0 表示不限速；执行期 ×60 换算为 TPM
+    写入线程组内常量吞吐量定时器（ConstantThroughputTimer）。
+    """
 
     thread_group_name: str = Field(..., examples=["登录接口压测"])
     testclass: str = Field("ThreadGroup", examples=["ThreadGroup"])
+    # 线程组启用开关：缺省取脚本扫描结果；false 时执行期整组不运行
+    enabled: bool = Field(True, examples=[True])
     num_threads: int = Field(1, examples=[100])
     ramp_time: int = Field(0, examples=[10])
-    loops: int = Field(1, examples=[1])  # -1 表示无限循环
-    scheduler: bool = Field(False, examples=[True])
-    duration: int = Field(0, examples=[300])  # scheduler=false 时为 0
+    tps: int = Field(0, ge=0, examples=[100])
 
 
 class ScenarioScriptIn(BaseModel):
@@ -129,11 +138,10 @@ class ScenarioIn(BaseModel):
                             {
                                 "thread_group_name": "登录接口压测",
                                 "testclass": "ThreadGroup",
+                                "enabled": True,
                                 "num_threads": 100,
                                 "ramp_time": 10,
-                                "loops": 1,
-                                "scheduler": True,
-                                "duration": 300,
+                                "tps": 100,
                             }
                         ],
                     }
@@ -173,11 +181,10 @@ class ScenarioUpdateIn(BaseModel):
                             {
                                 "thread_group_name": "登录接口压测",
                                 "testclass": "ThreadGroup",
+                                "enabled": True,
                                 "num_threads": 100,
                                 "ramp_time": 10,
-                                "loops": 1,
-                                "scheduler": True,
-                                "duration": 300,
+                                "tps": 100,
                             }
                         ],
                     }
@@ -201,9 +208,10 @@ class ThreadGroupSettingOut(BaseModel):
     id: int
     thread_group_name: str
     testclass: str
+    enabled: bool
     num_threads: int
     ramp_time: int
-    loops: int
+    tps: int
     scheduler: bool
     duration: int
 

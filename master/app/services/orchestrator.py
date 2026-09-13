@@ -37,29 +37,47 @@ _ACTIVE_STATUSES = (RunStatus.PENDING, RunStatus.RUNNING, RunStatus.STOPPING)
 # 停止看门狗：run_no -> 超时强制收尾任务（Agent 回报丢失/离线时兜底）
 _watchdogs: dict[str, asyncio.Task] = {}
 
-# 单交易基准场景固定参数（优先级高于场景保存的线程组设置）
+# 单交易基准场景固定线程数（优先级高于场景保存的线程组设置）
 _BASELINE_NUM_THREADS = 5
-_BASELINE_LOOPS = 100
 
 
 def _effective_thread_group_settings(
-    tgs: list[ScenarioScriptTG], scenario_type: ScenarioType
+    tgs: list[ScenarioScriptTG], scenario_type: ScenarioType, scenario_duration: int
 ) -> list[ScenarioScriptTG]:
     """计算实际生效的线程组设置。
 
-    单交易基准场景：线程数固定 5、循环 100、关闭调度器（duration 无效）；
-    其余场景类型直接使用数据库保存值。ramp_time 沿用保存值。
+    单交易基准场景：线程数固定 5、关闭调度器（duration 无效），
+    固定参数不受场景级运行时间影响；
+    其余场景类型：调度器统一开启，运行时长用场景级 duration 覆盖线程组
+    保存值（兼容存量数据 scheduler=False 或与场景级不一致的行）。
+    ramp_time / tps 沿用保存值（tps ×60 写定时器由 jmx_assembler 处理）。
+    循环次数不再落库：非基准场景执行期统一无限循环，基准固定 100 次，
+    均由 jmx_assembler 按场景类型写入 XML。
     """
     if scenario_type != ScenarioType.SINGLE_BASELINE:
-        return list(tgs)
+        return [
+            ScenarioScriptTG(
+                scenario_script_id=tg.scenario_script_id,
+                thread_group_name=tg.thread_group_name,
+                testclass=tg.testclass,
+                enabled=tg.enabled,
+                num_threads=tg.num_threads,
+                ramp_time=tg.ramp_time,
+                tps=tg.tps,
+                scheduler=True,
+                duration=scenario_duration,
+            )
+            for tg in tgs
+        ]
     return [
         ScenarioScriptTG(
             scenario_script_id=tg.scenario_script_id,
             thread_group_name=tg.thread_group_name,
             testclass=tg.testclass,
+            enabled=tg.enabled,
             num_threads=_BASELINE_NUM_THREADS,
             ramp_time=tg.ramp_time,
-            loops=_BASELINE_LOOPS,
+            tps=tg.tps,
             scheduler=False,
             duration=0,
         )
@@ -184,52 +202,26 @@ async def create_run(
         # 场景级 -J 参数（host 等），所有 Agent 共用；线程参数已写入 XML，不再走 -J
         scenario_args = dict(base_args)
 
-        # 生效设置（单交易基准固定参数在此统一处理，确保多 Agent 拆分基于固定值）
+        # 生效设置（单交易基准固定参数 / 场景级运行时间覆盖在此统一处理，
+        # 确保多 Agent 拆分基于固定值）
         effective_tgs = _effective_thread_group_settings(
-            list(ss.thread_groups), scenario_type
+            list(ss.thread_groups), scenario_type, scenario.duration
         )
 
-        # 线程数按 Agent CPU 核数拆分；每台 Agent 组装一份带各自线程数的 JMX
+        # 线程数与目标 TPS 均按 Agent CPU 核数权重拆分（TPS 为集群总量均摊，
+        # 各机定时器只限速自己的份额）；每台 Agent 组装一份独立 JMX
         nodes = await agent_registry.get_nodes(aids)
+        weights = {
+            aid: max(1, (nodes[aid].cpu_cores or 0)) if aid in nodes else 1
+            for aid in aids
+        }
+        per_agent_tgs = _per_agent_tg_settings(effective_tgs, weights)
         if len(aids) > 1:
-            weights = {
-                aid: max(1, (nodes[aid].cpu_cores or 0)) if aid in nodes else 1
-                for aid in aids
-            }
-            # 每个 Agent 对应一份设置副本，仅 num_threads 被拆分
-            per_agent_tgs: dict[str, list[ScenarioScriptTG]] = {
-                aid: [
-                    ScenarioScriptTG(
-                        scenario_script_id=tg.scenario_script_id,
-                        thread_group_name=tg.thread_group_name,
-                        testclass=tg.testclass,
-                        num_threads=0,  # 稍后按拆分结果填充
-                        ramp_time=tg.ramp_time,
-                        loops=tg.loops,
-                        scheduler=tg.scheduler,
-                        duration=tg.duration,
-                    )
-                    for tg in effective_tgs
-                ]
-                for aid in aids
-            }
-            for tg in effective_tgs:
-                if tg.num_threads <= 0:
-                    continue
-                shares = split_threads(tg.num_threads, weights)
-                for aid, n in shares.items():
-                    for ag_tg in per_agent_tgs[aid]:
-                        if (
-                            ag_tg.thread_group_name == tg.thread_group_name
-                            and ag_tg.testclass == tg.testclass
-                        ):
-                            ag_tg.num_threads = n
             logger.info(
-                f"run={run_no} script={ss.script_id} 线程拆分: "
-                f"{ {tg.thread_group_name: tg.num_threads for tg in effective_tgs} }"
+                f"run={run_no} script={ss.script_id} 多机拆分 "
+                f"(agent: [(线程组, 线程数, TPS份额), ...]): "
+                f"{ {aid: [(t.thread_group_name, t.num_threads, t.tps) for t in tgs] for aid, tgs in per_agent_tgs.items()} }"
             )
-        else:
-            per_agent_tgs = {aids[0]: effective_tgs}
 
         # 为每个 Agent 组装 + 上传 JMX，并单独下发（保证每台执行对应线程份额）
         for aid in aids:
@@ -381,6 +373,72 @@ def split_threads(total: int, weights: dict[str, int]) -> dict[str, int]:
             shares[donor] -= 1
             shares[a] += 1
     return shares
+
+
+def split_tps(total_tps: int, weights: dict[str, int]) -> dict[str, float]:
+    """按权重（CPU 核数）把集群目标 TPS 均摊到各 Agent，份额之和守恒。
+
+    与 split_threads 同权重，使每台 Agent 的 TPS 份额与其线程份额匹配。
+    与线程不同，TPS 允许小数份额（常量吞吐量定时器 throughput 为 double，
+    单位样本/分钟，最小限速粒度可小于 1 TPS）：total < Agent 数或权重悬殊时
+    仍保证每台均有限速，避免某台拿到 0 变成不限速导致集群总量失控。
+    total=0 时全返回 0.0（各 Agent 均不限速）。
+
+    份额保留两位小数，舍入误差补到权重最大的机器，保证合计精确等于 total。
+    """
+    if not weights:
+        return {}
+    agents = sorted(weights, key=lambda a: max(1, weights[a]), reverse=True)
+    if total_tps <= 0:
+        return {a: 0.0 for a in agents}
+    wsum = sum(max(1, w) for w in weights.values())
+    shares = {a: round(total_tps * max(1, weights[a]) / wsum, 2) for a in agents}
+    # 舍入漂移补到权重最大的机器，保证集群总量守恒
+    drift = round(total_tps - sum(shares.values()), 2)
+    if drift:
+        shares[agents[0]] = round(shares[agents[0]] + drift, 2)
+    return shares
+
+
+def _per_agent_tg_settings(
+    effective_tgs: list[ScenarioScriptTG], weights: dict[str, int]
+) -> dict[str, list[ScenarioScriptTG]]:
+    """构造 per-Agent 线程组设置副本：num_threads 与 tps 均按 CPU 权重拆分。
+
+    线程数用 split_threads 整数拆分（最大余数法）；tps 用 split_tps 浮点
+    均摊（集群目标 TPS 守恒，单机副本允许小数份额，这些副本不落库）。
+    副本先以 0 占位，再按 (线程组名, 类型) 匹配填充；其余字段原样复制。
+    """
+    per_agent: dict[str, list[ScenarioScriptTG]] = {
+        aid: [
+            ScenarioScriptTG(
+                scenario_script_id=tg.scenario_script_id,
+                thread_group_name=tg.thread_group_name,
+                testclass=tg.testclass,
+                enabled=tg.enabled,
+                num_threads=0,  # 稍后按拆分结果填充
+                ramp_time=tg.ramp_time,
+                tps=0.0,  # 稍后按均摊结果填充（允许小数份额，副本不写库）
+                scheduler=tg.scheduler,
+                duration=tg.duration,
+            )
+            for tg in effective_tgs
+        ]
+        for aid in weights
+    }
+    for tg in effective_tgs:
+        thread_shares = split_threads(tg.num_threads, weights)
+        tps_shares = split_tps(tg.tps, weights)
+        for aid in weights:
+            for ag_tg in per_agent[aid]:
+                if (
+                    ag_tg.thread_group_name != tg.thread_group_name
+                    or ag_tg.testclass != tg.testclass
+                ):
+                    continue
+                ag_tg.num_threads = thread_shares.get(aid, 0)
+                ag_tg.tps = tps_shares.get(aid, 0.0)
+    return per_agent
 
 
 def _merge_summaries(summaries: list[dict]) -> dict:

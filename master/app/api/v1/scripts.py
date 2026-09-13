@@ -269,8 +269,9 @@ async def get_thread_groups(
 ) -> dict:
     """扫描项目内脚本 JMX，返回线程组参数（前端展示与修改用）。
 
-    逐层校验 enabled，禁用链路下的线程组不返回；线程组参数中的用户变量
-    引用已按"线程组内变量 > 全局变量"作用域解析，无法静态解析的字段取 0。
+    禁用的线程组仍返回（enabled=False，供前端展示开关）；组内禁用控制器/
+    取样器子树不参与变量与定时器解析。线程组参数中的用户变量引用已按
+    "线程组内变量 > 全局变量"作用域解析，无法静态解析的字段取 0。
     """
     await ensure_project_access(db, project_id, user, "viewer")
     script = await _get_scoped_script(db, project_id, script_id)

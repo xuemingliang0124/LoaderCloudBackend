@@ -99,7 +99,7 @@ uvicorn app.main:app --reload
 | `DELETE /api/v1/projects/{project_id}/members/{username}` | 移除成员（owner+）：创建者不可移除/末位 owner 不可移除 3034，成员不存在 3033 |
 | `POST /api/v1/projects/{project_id}/scripts` | 在项目下上传 JMX（multipart），可带数据文件（csv/txt/dat/tsv）与 params 占位符定义；项目不存在 3021 |
 | `GET /api/v1/projects/{project_id}/scripts` | 项目内脚本列表（分页、名称模糊查询） |
-| `GET /api/v1/projects/{project_id}/scripts/{id}/thread-groups` | 静态扫描 JMX，返回启用线程组及加压参数（前端配置场景用）；跨项目访问 3022 |
+| `GET /api/v1/projects/{project_id}/scripts/{id}/thread-groups` | 静态扫描 JMX，返回全部线程组（含禁用组 enabled=false）及加压参数（前端配置场景用）；跨项目访问 3022 |
 | `PUT /api/v1/projects/{project_id}/scripts/{id}/jmx` | 替换 JMX：新旧启用线程组（名称+类型）必须一致，否则拒绝（3009） |
 | `DELETE /api/v1/projects/{project_id}/scripts/{id}` | 删除脚本：跨项目 3022；被场景引用时拒绝（3010），随后清理 MinIO 对象 |
 | `POST/GET /api/v1/plugins` | 全局插件池：jar 上传（sha256 内容去重）/列表 |
@@ -108,6 +108,7 @@ uvicorn app.main:app --reload
 | `POST /api/v1/plugins/{id}/sync` | 手动触发对在线 Agent 推送同步 |
 | `POST /api/v1/projects/{project_id}/scenarios` | 在项目下创建场景：多脚本组合 + 脚本级选机（agent_tags/agent_count）+ 线程组级参数；脚本须属于该项目（3022），项目不存在 3021 |
 | `GET /api/v1/projects/{project_id}/scenarios` | 项目内场景列表（分页、名称模糊查询） |
+| `GET /api/v1/projects/{project_id}/scenarios/{id}` | 场景详情（viewer+）：基础信息 + 关联脚本（选机/数量）及线程组级参数；不存在 3013，跨项目 3022 |
 | `PUT /api/v1/projects/{project_id}/scenarios/{id}` | 修改场景：基础信息 + 脚本关联事务内全量替换；跨项目 3022，有未结束任务时拒绝（3014） |
 | `GET /api/v1/projects/{project_id}/scenarios/{id}/delete-precheck` | 删除预检：返回 running_runs / history_runs / schedule_jobs |
 | `DELETE /api/v1/projects/{project_id}/scenarios/{id}?force=` | 跨项目 3022；严格模式默认拒绝（3014 运行中 / 3015 定时引用 / 3016 历史记录）；force=true 级联删除并清理 MinIO 产物 |
@@ -172,20 +173,20 @@ uvicorn app.main:app --reload
 - [x] 结果汇聚持久化到 `run_agent_result` 表（替代内存态 `_pending_results`），Master 重启经 `recover_active_runs` 恢复汇聚现场
 - [x] 脚本级插件依赖声明：脚本上传插件 jar，Master 下发时比对 Agent 已装清单，缺失的预签 URL 随任务下发到 plugin_dir 并经 `-Jsearch_paths` 注入，免改镜像
 - [x] 插件池化与压力机维度依赖管理：jar 上传到全局 `jmeter_plugin` 表（sha256 去重），`agent_plugin` 关联表审计实际安装；Agent 启动按 `expected_plugins` diff 对齐 + 在线推送 `MSG_PLUGIN_SYNC/REMOVE` + 心跳对账纠偏，任务期 remove 标记 pending 等结束后清理 — `api/v1/plugins.py` `services/plugin_sync.py` `agent/pt_agent/plugin_sync.py`
-- [x] Agent 分组调度（标签 OR 匹配）与 `total_threads` 按压力机 CPU 核数最大余数法拆分 — `orchestrator.py` `split_threads`
+- [x] Agent 分组调度（标签 OR 匹配）与 `total_threads` 按压力机 CPU 核数最大余数法拆分、目标 TPS 同权重浮点均摊（集群总量守恒，单机份额可为小数）— `orchestrator.py` `split_threads` / `split_tps`
 - [x] WebSocket 实时曲线替代前端轮询 ES：前端订阅 `/ws/runs/{run_no}?token=`，metrics/状态经 `FrontendHub` fan-out
 
 ### P2+ — 脚本与场景管理闭环
 
 - [x] 脚本数据文件（csv/txt/dat/tsv）随 JMX 上传：扩展名/重名校验 + 按 JMX 内引用做缺失校验（3003/3004/3006）
-- [x] JMX 线程组静态扫描：逐层 enabled 链路过滤、用户变量按"线程组内 > 全局"作用域解析 — `services/jmx_scanner.py`，`GET /projects/{project_id}/scripts/{id}/thread-groups`
+- [x] JMX 线程组静态扫描：返回全部线程组（含禁用组，enabled 标记开关；TestPlan 禁用除外），组内逐层 enabled 链路过滤、用户变量按"线程组内 > 全局"作用域解析；TPS 在线程组子树内 DFS 找第一个生效定时器（含事务控制器/取样器下，自身及祖先链均启用；禁用不计），throughput(TPM)/60 换算，含变量/__P 解析；替换 JMX 仅比对启用组（旧版启用组在新版被停用判 3009） — `services/jmx_scanner.py`，`GET /projects/{project_id}/scripts/{id}/thread-groups`
 - [x] JMX 文件替换：新旧启用线程组按"名称 + 类型"比对一致才允许覆盖（3009），线程数/rampUp/循环等差异由场景设置在执行期覆盖 — `PUT /projects/{project_id}/scripts/{id}/jmx`
 - [x] 脚本删除：场景引用预检（3010）+ MinIO JMX 与数据文件物理清理（失败仅告警）
-- [x] 多脚本场景：`scenario_script`（脚本顺序、agent_tags OR 选机、agent_count）+ `scenario_script_tg`（线程组级 num_threads/ramp_time/loops/scheduler/duration），场景-脚本关联全量替换
-- [x] 场景类型四枚举（单交易基准/单交易负载/混合场景/稳定性）+ 场景级 duration（Pydantic 与 ORM Enum 双层约束）
+- [x] 多脚本场景：`scenario_script`（脚本顺序、agent_tags OR 选机、agent_count）+ `scenario_script_tg`（线程组级 enabled 启用开关/num_threads/ramp_time/tps；scheduler 统一 True、duration 由场景级运行时间覆盖，接口不再接收；执行期 enabled 写入线程组节点，禁用组整组不运行），场景-脚本关联全量替换
+- [x] 场景类型四枚举（单交易基准/单交易负载/混合场景/稳定性）+ 场景级 duration（非基准场景覆盖全部线程组运行时长、循环统一无限；单交易基准执行期固定参数：线程 5/循环 100/关闭调度器，不受影响）
 - [x] 场景修改接口 `PUT /projects/{project_id}/scenarios/{id}`：存在 PENDING/RUNNING/STOPPING 任务时拒绝（3014），脚本关联在事务内删旧重建
 - [x] 场景删除预检 + `force=true` 级联删除：run_agent_result → scenario_run → 定时任务（APScheduler remove_job）→ scenario，事务提交后 best-effort 清理 MinIO `runs/{run_no}/`（3014/3015/3016）
-- [x] 执行期 JMX 组装：按场景设置改写线程组参数，单交易基准开启 TestPlan `serialize_threadgroups` — `services/jmx_assembler.py`
+- [x] 执行期 JMX 组装：按场景设置改写线程组启用状态（enabled 属性）与参数、常量吞吐量定时器（子树 DFS 优先复用脚本内第一个定时器——含事务控制器/取样器下，没有才组顶部补建；多机时 tps 按 Agent 均摊后 ×60=TPM，tps=0 递归禁用不限速），单交易基准开启 TestPlan `serialize_threadgroups` — `services/jmx_assembler.py`
 - [x] Agent 按宿主机 IP 注册固定 agent_id（UDP connect 探测网卡，Master 不可达指数退避重试），显式 `AGENT_ID` 配置优先 — `agent/pt_agent/identity.py` + `POST /agents/register`
 - [x] 插件策略收敛为纯全局池：取消脚本-插件绑定检查，上传 sha256 去重，删除联动 MinIO 物理删除；启动期一次性迁移历史脚本级插件
 - [x] 列表接口统一分页 + 关键字模糊查询（agents/scripts/scenarios/schedules）

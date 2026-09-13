@@ -457,7 +457,7 @@ async def test_force_cascade_deletes_all_assets(client, db_session) -> None:
                 testclass="ThreadGroup",
                 num_threads=10,
                 ramp_time=0,
-                loops=1,
+                tps=0,
                 scheduler=False,
                 duration=0,
             ),
