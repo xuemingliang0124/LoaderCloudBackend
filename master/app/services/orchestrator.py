@@ -387,7 +387,11 @@ def _merge_summaries(summaries: list[dict]) -> dict:
     """合并多 Agent 的 summary，按 (label, sample_type) 聚合。
 
     合并口径：
-    - samples/errors：直接累加（各 Agent 独立加压，总量有意义）
+    - samples/errors/success：直接累加（各 Agent 独立加压，总量有意义）；
+      旧 Agent 缺 success 时按 samples-errors 兜底
+    - min_rt：取各 Agent 最小值（只比较 >0 的有效值，缺省 0 视为未上报）；
+      真实全零（elapsed 全为 0）时结果同为 0，口径无歧义
+    - max_rt：取 max（缺省 0 不影响 max 语义）
     - p95_rt：取 max（保守口径，代表整体瓶颈；跨进程精确 p95 需各 Agent 上报
       延迟分桶或原始延迟数组，留 P2）
     - max_tps：取 max（峰值不累加，因各 Agent 时间轴可能错峰；真实聚合峰值
@@ -396,13 +400,30 @@ def _merge_summaries(summaries: list[dict]) -> dict:
       事务与取样器同名时因 sample_type 不同不会互相污染，旧 Agent 上报
       缺 sample_type 时按 request 兜底
     """
-    totals = {"samples": 0, "errors": 0, "p95_rt": 0.0, "max_tps": 0.0}
+    totals = {
+        "samples": 0,
+        "success": 0,
+        "errors": 0,
+        "min_rt": 0.0,
+        "max_rt": 0.0,
+        "p95_rt": 0.0,
+        "max_tps": 0.0,
+    }
     by_label: dict[tuple[str, str], dict] = {}
     for s in summaries:
-        totals["samples"] += int(s.get("samples") or 0)
-        totals["errors"] += int(s.get("errors") or 0)
+        samples = int(s.get("samples") or 0)
+        errors = int(s.get("errors") or 0)
+        totals["samples"] += samples
+        totals["errors"] += errors
+        totals["success"] += int(s.get("success") or (samples - errors))
+        totals["max_rt"] = max(totals["max_rt"], float(s.get("max_rt") or 0.0))
         totals["p95_rt"] = max(totals["p95_rt"], float(s.get("p95_rt") or 0.0))
         totals["max_tps"] = max(totals["max_tps"], float(s.get("max_tps") or 0.0))
+        agent_min_rt = float(s.get("min_rt") or 0.0)
+        if agent_min_rt > 0 and (
+            totals["min_rt"] == 0.0 or agent_min_rt < totals["min_rt"]
+        ):
+            totals["min_rt"] = agent_min_rt
         for item in s.get("by_label") or []:
             label = item.get("label") or "_unknown"
             stype = item.get("sample_type") or "request"
@@ -412,23 +433,38 @@ def _merge_summaries(summaries: list[dict]) -> dict:
                     "label": label,
                     "sample_type": stype,
                     "samples": 0,
+                    "success": 0,
                     "errors": 0,
+                    "min_rt": 0.0,
+                    "max_rt": 0.0,
                     "p95_rt": 0.0,
                     "max_tps": 0.0,
                 },
             )
-            bucket["samples"] += int(item.get("samples") or 0)
-            bucket["errors"] += int(item.get("errors") or 0)
+            lbl_samples = int(item.get("samples") or 0)
+            lbl_errors = int(item.get("errors") or 0)
+            bucket["samples"] += lbl_samples
+            bucket["errors"] += lbl_errors
+            bucket["success"] += int(item.get("success") or (lbl_samples - lbl_errors))
+            bucket["max_rt"] = max(bucket["max_rt"], float(item.get("max_rt") or 0.0))
             bucket["p95_rt"] = max(bucket["p95_rt"], float(item.get("p95_rt") or 0.0))
             bucket["max_tps"] = max(
                 bucket["max_tps"], float(item.get("max_tps") or 0.0)
             )
+            lbl_min_rt = float(item.get("min_rt") or 0.0)
+            if lbl_min_rt > 0 and (
+                bucket["min_rt"] == 0.0 or lbl_min_rt < bucket["min_rt"]
+            ):
+                bucket["min_rt"] = lbl_min_rt
     by_label_sorted = sorted(
         by_label.values(), key=lambda x: x["samples"], reverse=True
     )
     return {
         "samples": totals["samples"],
+        "success": totals["success"],
         "errors": totals["errors"],
+        "min_rt": totals["min_rt"],
+        "max_rt": totals["max_rt"],
         "p95_rt": totals["p95_rt"],
         "max_tps": totals["max_tps"],
         "by_label": by_label_sorted,

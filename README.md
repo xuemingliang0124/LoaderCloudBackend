@@ -117,6 +117,7 @@ uvicorn app.main:app --reload
 | `POST /api/v1/projects/{project_id}/runs/{run_no}/stop` | 停止执行（记录须属于该项目 2003/3022；先置 STOPPING，收齐 Agent 回报或看门狗超时才置 STOPPED） |
 | `WS /ws/runs/{run_no}?token=` | 前端实时通道：指标批次/状态 fan-out，替代轮询 ES；仅项目成员（viewer+）可订阅，无权/记录不存在一律 1008 拒绝 |
 | `GET /api/v1/metrics/timeseries` | ES 按 label 聚合的时间序列曲线，可选 `sample_type=request\|transaction` 过滤；仅项目成员（viewer+）可查（3030），记录不存在 2003 |
+| `GET /api/v1/runs/{run_no}/summary` | 执行终态汇总（ES pt-summary 原样透出：agents/failed_agents/summary/artifacts/stopped，summary 含 samples/success/errors/min_rt/max_rt/p95_rt/max_tps/by_label）；仅项目成员（viewer+）可查（3030），记录不存在 2003，汇总未生成/缺失 2004 |
 | `POST/GET /api/v1/projects/{project_id}/schedules` | 项目内定时场景（标准 5 段 crontab；场景须属于该项目 3013/3022），支持名称/启用状态过滤 |
 | `POST /api/v1/projects/{project_id}/schedules/{id}/toggle` | 定时任务启停（任务须属于该项目 4002/3022；联动 APScheduler 注册/注销） |
 

@@ -24,6 +24,9 @@ JMeter `-l xxx.jtl` 默认输出 CSV（首字符 `<` 时为 XML，仅做 CSV 支
   by_label（sample_type=transaction），避免事务父样本与子请求双计、p95 失真；
   整份 JTL 无 request 行的罕见配置（父样本模式关闭 subresults）下兜底回退
   为全量计入并告警。
+- 指标字段：全局与 by_label 均输出 samples/success/errors（成功/失败笔数）与
+  min_rt/max_rt/p95_rt（响应时间最小/最大/95 分位）；success 由 samples-errors
+  推导，min/max 直接取自已保留的 elapsed 列表（p95 同源，无额外扫描开销）。
 """
 
 import asyncio
@@ -164,7 +167,10 @@ def _build_summary(parsed: dict, failed: bool) -> dict:
                 "label": label,
                 "sample_type": stype,
                 "samples": stats["samples"],
+                "success": stats["samples"] - stats["errors"],
                 "errors": stats["errors"],
+                "min_rt": float(min(stats["elapsed"])) if stats["elapsed"] else 0.0,
+                "max_rt": float(max(stats["elapsed"])) if stats["elapsed"] else 0.0,
                 "p95_rt": _percentile_95(stats["elapsed"]),
                 "max_tps": float(max_tps),
             }
@@ -178,7 +184,10 @@ def _build_summary(parsed: dict, failed: bool) -> dict:
     return {
         "failed": failed,
         "samples": parsed["samples"],
+        "success": parsed["samples"] - parsed["errors"],
         "errors": parsed["errors"],
+        "min_rt": float(min(parsed["elapsed"])) if parsed["elapsed"] else 0.0,
+        "max_rt": float(max(parsed["elapsed"])) if parsed["elapsed"] else 0.0,
         "p95_rt": _percentile_95(parsed["elapsed"]),
         "max_tps": max_tps,
         "by_label": by_label,
@@ -201,7 +210,10 @@ async def parse_summary(jtl_path: str, failed: bool = False) -> dict:
         return {
             "failed": True,
             "samples": 0,
+            "success": 0,
             "errors": 0,
+            "min_rt": 0.0,
+            "max_rt": 0.0,
             "p95_rt": 0.0,
             "max_tps": 0.0,
             "by_label": [],
@@ -348,8 +360,11 @@ def _build_increment_metrics(parsed: dict, interval_s: int) -> dict:
                 "label": label,
                 "sample_type": stype,
                 "samples": lbl_samples,
+                "success": lbl_samples - stats["errors"],
                 "interval_tps": lbl_samples / interval_s if interval_s > 0 else 0.0,
                 "avg_rt": sum(lbl_elapsed) / len(lbl_elapsed) if lbl_elapsed else 0.0,
+                "min_rt": float(min(lbl_elapsed)) if lbl_elapsed else 0.0,
+                "max_rt": float(max(lbl_elapsed)) if lbl_elapsed else 0.0,
                 "p95_rt": _percentile_95(lbl_elapsed),
                 "err_rate": stats["errors"] / lbl_samples if lbl_samples else 0.0,
                 "errors": stats["errors"],
@@ -360,8 +375,11 @@ def _build_increment_metrics(parsed: dict, interval_s: int) -> dict:
 
     return {
         "samples": samples,
+        "success": samples - parsed["errors"],
         "interval_tps": interval_tps,
         "avg_rt": avg_rt,
+        "min_rt": float(min(elapsed)) if elapsed else 0.0,
+        "max_rt": float(max(elapsed)) if elapsed else 0.0,
         "p95_rt": p95_rt,
         "err_rate": err_rate,
         "errors": parsed["errors"],

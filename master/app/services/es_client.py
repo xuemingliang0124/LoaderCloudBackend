@@ -25,9 +25,12 @@ _METRICS_MAPPING = {
             "@timestamp": {"type": "date"},
             "interval_tps": {"type": "float"},
             "avg_rt": {"type": "float"},
+            "min_rt": {"type": "float"},
+            "max_rt": {"type": "float"},
             "p95_rt": {"type": "float"},
             "err_rate": {"type": "float"},
             "samples": {"type": "long"},
+            "success": {"type": "long"},
             "errors": {"type": "long"},
             "threads": {"type": "integer"},
         }
@@ -86,8 +89,12 @@ async def write_metrics(doc: dict) -> None:
                         "sample_type",
                         "interval_tps",
                         "avg_rt",
+                        "min_rt",
+                        "max_rt",
                         "p95_rt",
                         "err_rate",
+                        "samples",
+                        "success",
                         "errors",
                     )
                     if k in item
@@ -105,6 +112,25 @@ async def write_summary(run_no: str, summary: dict) -> None:
     )
 
 
+async def query_summary(run_no: str) -> dict | None:
+    """按 run_no 读取 pt-summary 汇总文档（write_summary 写入结构原样透出）。
+
+    run 每次收官只写一条，term 查询 size=1 足够；无文档（执行尚未结束、
+    历史数据缺失或 ES 丢数）返回 None，由调用方区分提示。
+    返回体剥离 run_no（路径已携带）。
+    """
+    resp = await get_es().search(
+        body={"size": 1, "query": {"term": {"run_no": run_no}}},
+        index=get_settings().summary_index,
+    )
+    hits = (resp.get("hits", {}) or {}).get("hits", []) or []
+    if not hits:
+        return None
+    src = dict(hits[0].get("_source", {}) or {})
+    src.pop("run_no", None)
+    return src
+
+
 async def query_timeseries(
     run_no: str,
     start_ts: int,
@@ -115,9 +141,13 @@ async def query_timeseries(
     """按 label（及 sample_type）维度聚合时间序列，拍平为前端直接消费的点列表。
 
     返回：[{"ts": <unix秒>, "label": str, "sample_type": str,
-           "tps": float, "avg_rt": float(ms), "error_rate": float(百分比)}]
+           "tps": float, "avg_rt": float(ms), "error_rate": float(百分比),
+           "min_rt": float(ms), "max_rt": float(ms),
+           "samples": int, "success": int, "errors": int}]
     sample_type 传 request/transaction 时仅聚合对应类型文档；label 与
     sample_type 二级分桶，事务与取样器同名的曲线不会互相污染。
+    min_rt/max_rt 取桶内各 5s 批次的最小/最大（口径与批次一致）；
+    samples/errors 为桶内求和，success 由 samples-errors 推导。
     注意：ES 中 err_rate 存的是 0~1 比率（errors/samples），此处 *100 转百分比；
     ts 取 date_histogram 桶 key（epoch 毫秒）//1000，绝对时区无关；
     无 sample_type 的文档（_total 聚合文档/旧数据）落入 "_total" 类型桶。
@@ -150,7 +180,11 @@ async def query_timeseries(
                                 "aggs": {
                                     "tps": {"avg": {"field": "interval_tps"}},
                                     "rt": {"avg": {"field": "avg_rt"}},
+                                    "min_rt": {"min": {"field": "min_rt"}},
+                                    "max_rt": {"max": {"field": "max_rt"}},
                                     "err": {"avg": {"field": "err_rate"}},
+                                    "samples": {"sum": {"field": "samples"}},
+                                    "errors": {"sum": {"field": "errors"}},
                                 },
                             }
                         },
@@ -172,6 +206,8 @@ async def query_timeseries(
         for type_bucket in (label_bucket.get("by_type", {}) or {}).get("buckets", []):
             stype = type_bucket.get("key")
             for tb in (type_bucket.get("over_time", {}) or {}).get("buckets", []):
+                samples = int(tb.get("samples", {}).get("value") or 0)
+                errors = int(tb.get("errors", {}).get("value") or 0)
                 points.append(
                     {
                         "ts": int(tb["key"]) // 1000,
@@ -179,9 +215,14 @@ async def query_timeseries(
                         "sample_type": stype,
                         "tps": round(tb.get("tps", {}).get("value") or 0.0, 3),
                         "avg_rt": round(tb.get("rt", {}).get("value") or 0.0, 2),
+                        "min_rt": round(tb.get("min_rt", {}).get("value") or 0.0, 2),
+                        "max_rt": round(tb.get("max_rt", {}).get("value") or 0.0, 2),
                         "error_rate": round(
                             (tb.get("err", {}).get("value") or 0.0) * 100, 2
                         ),
+                        "samples": samples,
+                        "success": samples - errors,
+                        "errors": errors,
                     }
                 )
     points.sort(key=lambda p: (p["ts"], str(p["label"]), str(p["sample_type"])))

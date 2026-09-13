@@ -2,12 +2,15 @@
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.core.security import create_access_token
 from app.main import app
+from app.models.enums import RunStatus
 from app.models.project_member import ProjectMember
 from app.models.run import ScenarioRun
 from app.models.scenario import Scenario
+from app.services import es_client
 
 _TOKEN = create_access_token("tester", "viewer")
 
@@ -25,6 +28,7 @@ def _auth(username: str, role: str = "viewer") -> dict:
         ("GET", "/api/v1/projects/1/runs/R20260913000001"),
         ("POST", "/api/v1/projects/1/runs"),
         ("POST", "/api/v1/projects/1/runs/R20260913000001/stop"),
+        ("GET", "/api/v1/runs/R20260913000001/summary"),
     ],
 )
 async def test_scoped_run_endpoints_require_token(method: str, path: str) -> None:
@@ -162,3 +166,113 @@ async def test_get_run_detail_cross_project_rejected_3022(client, db_session) ->
     )
     assert r.status_code == 400
     assert r.json()["code"] == 3022
+
+
+# ---------- 执行终态汇总（扁平路由 /runs/{run_no}/summary，ES mock） ----------
+
+
+async def test_run_summary_missing_run_rejected_2003(client) -> None:
+    r = await client.get(
+        "/api/v1/runs/R-SUMMARY-MISSING/summary", headers=_auth("alice")
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == 2003
+
+
+async def test_run_summary_non_member_rejected_3030(client, db_session) -> None:
+    pid = await _create_project(client, "项目A")
+    await _seed_run(db_session, pid, "R20260913100011")
+
+    r = await client.get("/api/v1/runs/R20260913100011/summary", headers=_auth("eve"))
+    assert r.status_code == 400
+    assert r.json()["code"] == 3030
+
+
+async def test_run_summary_running_returns_2004(client, db_session, monkeypatch):
+    """执行中（默认 PENDING）无汇总文档 → 2004「尚未结束」。"""
+
+    async def _fake_none(run_no: str) -> None:
+        return None
+
+    monkeypatch.setattr(es_client, "query_summary", _fake_none)
+    pid = await _create_project(client, "项目A")
+    await _seed_run(db_session, pid, "R20260913100012")
+
+    r = await client.get("/api/v1/runs/R20260913100012/summary", headers=_auth("alice"))
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == 2004
+    assert "尚未结束" in body["message"]
+
+
+async def test_run_summary_terminal_missing_doc_returns_2004(
+    client, db_session, monkeypatch
+):
+    """已终态但汇总文档缺失（历史数据/ES 丢数）→ 2004「不存在」。"""
+
+    async def _fake_none(run_no: str) -> None:
+        return None
+
+    monkeypatch.setattr(es_client, "query_summary", _fake_none)
+    pid = await _create_project(client, "项目A")
+    await _seed_run(db_session, pid, "R20260913100013")
+    run = (
+        (
+            await db_session.execute(
+                select(ScenarioRun).where(ScenarioRun.run_no == "R20260913100013")
+            )
+        )
+        .scalars()
+        .first()
+    )
+    run.status = RunStatus.FINISHED
+    await db_session.commit()
+
+    r = await client.get("/api/v1/runs/R20260913100013/summary", headers=_auth("alice"))
+    assert r.status_code == 400
+    assert r.json()["code"] == 2004
+
+
+async def test_run_summary_passthrough_on_hit(client, db_session, monkeypatch):
+    """命中汇总文档：原样透出（含 agents/failed_agents/summary/artifacts/stopped）。"""
+    doc = {
+        "agents": ["agent-1"],
+        "failed_agents": [],
+        "summary": {
+            "samples": 3,
+            "success": 2,
+            "errors": 1,
+            "min_rt": 100.0,
+            "max_rt": 300.0,
+            "p95_rt": 300.0,
+            "max_tps": 2.0,
+            "failed": False,
+            "by_label": [
+                {
+                    "label": "下单",
+                    "sample_type": "request",
+                    "samples": 3,
+                    "success": 2,
+                    "errors": 1,
+                    "min_rt": 100.0,
+                    "max_rt": 300.0,
+                    "p95_rt": 300.0,
+                    "max_tps": 2.0,
+                }
+            ],
+        },
+        "artifacts": [],
+        "stopped": False,
+    }
+
+    async def _fake_hit(run_no: str) -> dict:
+        assert run_no == "R20260913100014"
+        return doc
+
+    monkeypatch.setattr(es_client, "query_summary", _fake_hit)
+    pid = await _create_project(client, "项目A")
+    await _seed_run(db_session, pid, "R20260913100014")
+
+    r = await client.get("/api/v1/runs/R20260913100014/summary", headers=_auth("alice"))
+    assert r.status_code == 200
+    assert r.json()["data"] == doc

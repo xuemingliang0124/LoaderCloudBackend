@@ -6,21 +6,30 @@
 - 停止执行：记录不存在 2003 / 记录不属于该项目 3022
 执行记录的项目归属经 scenario_run.scenario_id → test_scenario.project_id 派生，
 场景项目归属不可变，无需冗余列。
+
+例外：GET /runs/{run_no}/summary 为扁平路由（run_no 全局唯一，汇总数据在 ES），
+门禁与 /metrics/timeseries 共用 ensure_run_visible（2003/3021/3030/3031）。
 """
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import CurrentUser, ensure_project_access, get_current_user
+from app.api.deps import (
+    CurrentUser,
+    ensure_project_access,
+    ensure_run_visible,
+    get_current_user,
+)
 from app.db.session import get_db
 from app.models.enums import RunTrigger
 from app.models.run import ScenarioRun
 from app.models.scenario import Scenario
 from app.schemas import RunCreateIn, RunOut
 from app.schemas.common import ok
-from app.services import orchestrator
+from app.services import es_client, orchestrator
 from app.services.exceptions import BusinessError
+from app.services.orchestrator import _ACTIVE_STATUSES
 
 router = APIRouter()
 
@@ -125,3 +134,30 @@ async def list_runs(
     )
     items = [RunOut.model_validate(r).model_dump(mode="json") for r in rows]
     return ok({"total": int(total or 0), "items": items})
+
+
+@router.get("/runs/{run_no}/summary")
+async def get_run_summary(
+    run_no: str,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """执行终态汇总（ES pt-summary 原样透出，扁平路由：run_no 全局唯一）。
+
+    返回 {agents, failed_agents, summary{samples,success,errors,min_rt,max_rt,
+    p95_rt,max_tps,failed,by_label[...]}, artifacts, stopped}；
+    可见性与 /metrics/timeseries 一致（ensure_run_visible）；
+    汇总未生成（执行中 PENDING/RUNNING/STOPPING）或文档缺失返回 2004。
+    """
+    await ensure_run_visible(db, run_no, user)
+    summary = await es_client.query_summary(run_no)
+    if summary is None:
+        run = (
+            (await db.execute(select(ScenarioRun).where(ScenarioRun.run_no == run_no)))
+            .scalars()
+            .first()
+        )
+        if run is not None and run.status in _ACTIVE_STATUSES:
+            raise BusinessError("执行尚未结束，汇总未生成", code=2004)
+        raise BusinessError("执行汇总不存在", code=2004)
+    return ok(summary)

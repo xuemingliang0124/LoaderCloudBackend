@@ -32,6 +32,8 @@ async def timeseries(
 
     sample_type 可选过滤：request=仅请求、transaction=仅事务；
     缺省时全量返回（点内含 sample_type 字段供前端分组）。
+    点字段含 tps/avg_rt/min_rt/max_rt/error_rate 及 samples/success/errors
+    （成功/失败笔数）。
     """
     await ensure_run_visible(db, run_no, user)
     return ok(

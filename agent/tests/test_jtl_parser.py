@@ -112,6 +112,47 @@ def test_summary_fallback_when_no_request_rows(tmp_path: Path):
     assert all(x["sample_type"] == "transaction" for x in summary["by_label"])
 
 
+def test_summary_min_max_rt_and_success_counts(tmp_path: Path):
+    """summary 全局与 by_label 输出 min_rt/max_rt 及成功/失败笔数。"""
+    jtl = tmp_path / "a.jtl"
+    _write_jtl(
+        jtl,
+        [
+            _req_row("下单", 1694000000000, 100),
+            _req_row("下单", 1694000000100, 300),
+            _req_row("下单", 1694000000200, 200, success="false"),
+            _tx_row("下单", 1694000000000, 500),
+        ],
+    )
+    summary = asyncio.run(parse_summary(str(jtl)))
+    # 全局只计 request 行：min/max 覆盖成功与失败样本
+    assert summary["samples"] == 3
+    assert summary["errors"] == 1
+    assert summary["success"] == 2
+    assert summary["min_rt"] == 100.0
+    assert summary["max_rt"] == 300.0
+    req = next(
+        x
+        for x in summary["by_label"]
+        if x["label"] == "下单" and x["sample_type"] == "request"
+    )
+    assert req["success"] == 2
+    assert req["errors"] == 1
+    assert req["min_rt"] == 100.0
+    assert req["max_rt"] == 300.0
+    tx = next(
+        x
+        for x in summary["by_label"]
+        if x["label"] == "下单" and x["sample_type"] == "transaction"
+    )
+    # 事务行独立桶：计数与 min/max 均为事务行自身口径
+    assert tx["samples"] == 1
+    assert tx["success"] == 1
+    assert tx["errors"] == 0
+    assert tx["min_rt"] == 500.0
+    assert tx["max_rt"] == 500.0
+
+
 # ---------- 增量解析 ----------
 
 
@@ -162,3 +203,30 @@ def test_parse_increment_async_entry_carries_sample_type(tmp_path: Path):
     assert ("下单", "request") in by_key
     assert ("下单", "transaction") in by_key
     assert state["saw_request"] is True
+
+
+def test_increment_min_max_rt_and_success_counts(tmp_path: Path):
+    """增量 metrics 全局与 by_label 输出 min_rt/max_rt 及成功/失败笔数。"""
+    jtl = tmp_path / "a.jtl"
+    _write_jtl(
+        jtl,
+        [
+            _req_row("下单", 1694000000000, 100),
+            _req_row("下单", 1694000000100, 300),
+            _req_row("下单", 1694000000200, 200, success="false"),
+        ],
+    )
+    metrics, _ = asyncio.run(parse_increment(str(jtl), 0, 5, {}))
+    assert metrics["samples"] == 3
+    assert metrics["errors"] == 1
+    assert metrics["success"] == 2
+    assert metrics["min_rt"] == 100.0
+    assert metrics["max_rt"] == 300.0
+    req = next(
+        x
+        for x in metrics["by_label"]
+        if x["label"] == "下单" and x["sample_type"] == "request"
+    )
+    assert req["success"] == 2
+    assert req["min_rt"] == 100.0
+    assert req["max_rt"] == 300.0
