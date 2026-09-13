@@ -113,6 +113,7 @@ uvicorn app.main:app --reload
 | `DELETE /api/v1/projects/{project_id}/scenarios/{id}?force=` | 跨项目 3022；严格模式默认拒绝（3014 运行中 / 3015 定时引用 / 3016 历史记录）；force=true 级联删除并清理 MinIO 产物 |
 | `POST /api/v1/projects/{project_id}/runs` | 在项目下触发执行（场景须属于该项目 3013/3022；自动选机或指定 agent_ids） |
 | `GET /api/v1/projects/{project_id}/runs` | 项目内执行记录列表（分页，经场景归属过滤） |
+| `GET /api/v1/projects/{project_id}/runs/{run_no}` | 执行记录详情（返回同列表单条；记录须属于该项目 2003/3022） |
 | `POST /api/v1/projects/{project_id}/runs/{run_no}/stop` | 停止执行（记录须属于该项目 2003/3022；先置 STOPPING，收齐 Agent 回报或看门狗超时才置 STOPPED） |
 | `WS /ws/runs/{run_no}?token=` | 前端实时通道：指标批次/状态 fan-out，替代轮询 ES；仅项目成员（viewer+）可订阅，无权/记录不存在一律 1008 拒绝 |
 | `GET /api/v1/metrics/timeseries` | ES 按 label 聚合的时间序列曲线，可选 `sample_type=request\|transaction` 过滤；仅项目成员（viewer+）可查（3030），记录不存在 2003 |

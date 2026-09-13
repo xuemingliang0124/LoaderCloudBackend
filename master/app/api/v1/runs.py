@@ -80,6 +80,19 @@ async def stop_run(
     return ok(message="停止指令已下发")
 
 
+@router.get("/projects/{project_id}/runs/{run_no}")
+async def get_run(
+    run_no: str,
+    project_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """执行记录详情：返回结构与列表中单条记录一致（2003/3022）。"""
+    await ensure_project_access(db, project_id, user, "viewer")
+    run = await _get_scoped_run(db, project_id, run_no)
+    return ok(RunOut.model_validate(run).model_dump(mode="json"))
+
+
 @router.get("/projects/{project_id}/runs")
 async def list_runs(
     project_id: int,
