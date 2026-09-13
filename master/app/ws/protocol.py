@@ -14,8 +14,8 @@ MSG_REGISTER = "register"  # data: agent_id, ip, hostname, tags, jmeter_version,
 MSG_HEARTBEAT = "heartbeat"  # data: cpu, mem, net_in, net_out, cpu_cores, mem_total_gb, status, current_run_id, plugin_hashes[]
 MSG_TASK_ACK = "task_ack"  # data: run_id, accepted, message
 MSG_STATUS = "status"  # data: run_id, phase, message
-MSG_METRICS = "metrics"  # data: run_no, interval_tps, avg_rt, p95_rt, err_rate, threads, by_label[]
-MSG_RESULT = "result"  # data: run_id, summary{samples,errors,p95_rt,max_tps,failed,by_label[{label,samples,errors,p95_rt,max_tps}]}, artifacts
+MSG_METRICS = "metrics"  # data: run_no, interval_tps, avg_rt, p95_rt, err_rate, threads, by_label[{label,sample_type,samples,interval_tps,avg_rt,p95_rt,err_rate,errors,threads}]，sample_type=request|transaction
+MSG_RESULT = "result"  # data: run_id, summary{samples,errors,p95_rt,max_tps,failed,by_label[{label,sample_type,samples,errors,p95_rt,max_tps}]}, artifacts
 MSG_PLUGIN_ACK = (
     "plugin_ack"  # data: plugins[{name,sha256,size}] Agent 端插件清单变更后上报
 )

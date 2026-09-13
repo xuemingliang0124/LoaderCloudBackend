@@ -16,6 +16,14 @@ JMeter `-l xxx.jtl` 默认输出 CSV（首字符 `<` 时为 XML，仅做 CSV 支
   JMeter CSV 的 timeStamp 是请求开始时间（毫秒），按它分桶即得 RPS 峰值。
 - 增量 offset 记录绝对文件位置；JMeter 持续追加写入，每次只处理新增行。
   offset 落在行中间时丢弃不完整行（残行），避免解析错位。
+- 事务/请求区分：JMeter 事务控制器生成的样本行在 responseMessage 携带官方标记
+  "Number of samples in transaction : N, number of failing samples : M"
+  （源码 TransactionSampler.setTransactionDone），失败事务同样携带该标记，
+  据此做行级判定（与 label 无关，事务与取样器同名也不歧义）。
+  全局口径（总 samples/TPS/p95/max_tps）只计 request 行，事务行仅进入
+  by_label（sample_type=transaction），避免事务父样本与子请求双计、p95 失真；
+  整份 JTL 无 request 行的罕见配置（父样本模式关闭 subresults）下兜底回退
+  为全量计入并告警。
 """
 
 import asyncio
@@ -54,24 +62,47 @@ def _percentile_95(values: list[int]) -> float:
     return float(sv[lo] + (sv[hi] - sv[lo]) * frac)
 
 
+# JMeter 事务行的官方标记（TransactionController 生成的事务样本收尾时写入，
+# 成功/失败事务均携带，仅 N/M 计数不同）
+_TRANSACTION_MARKER = "Number of samples in transaction"
+
+
+def _is_transaction_row(row: dict) -> bool:
+    """行级判定是否为事务控制器生成的样本。
+
+    标记正常落在 responseMessage；responseCode 事务成功时为 OK、失败时复制
+    首个子样本状态码，正常不含标记，两列都查属防御性兜底（列序/格式漂移）。
+    """
+    return _TRANSACTION_MARKER in (row.get("responseCode") or "") or (
+        _TRANSACTION_MARKER in (row.get("responseMessage") or "")
+    )
+
+
 def _parse_csv_sync(jtl_path: str) -> dict:
     """同步扫描 CSV JTL，返回原始聚合中间态。
 
     返回结构（内部用，executor 再拼装成协议字段）：
     {
-      "samples": int, "errors": int,
-      "elapsed": list[int],                # 全局延迟列表（算 p95）
+      "samples": int, "errors": int,     # 仅 request 行口径（全为事务时兜底回填）
+      "elapsed": list[int],              # 全局延迟列表（算 p95，仅 request 行）
       "by_label": {
-        label: {"samples": int, "errors": int, "elapsed": list[int]}
+        (label, sample_type): {"samples", "errors", "elapsed", "per_second"}
       },
-      "per_second": dict[int_second, int_count]   # 算 max_tps
+      "per_second": dict[int_second, int_count]   # 算 max_tps（仅 request 行）
     }
     """
     totals = {
         "samples": 0,
         "errors": 0,
         "elapsed": [],
-        "by_label": defaultdict(lambda: {"samples": 0, "errors": 0, "elapsed": []}),
+        "by_label": defaultdict(
+            lambda: {
+                "samples": 0,
+                "errors": 0,
+                "elapsed": [],
+                "per_second": defaultdict(int),
+            }
+        ),
         "per_second": defaultdict(int),
     }
     if not _is_csv(jtl_path):
@@ -89,33 +120,53 @@ def _parse_csv_sync(jtl_path: str) -> dict:
                 continue  # 跳过非法行（如 JMeter 启动期的占位行）
             label = row.get("label") or "_total"
             success = (row.get("success") or "").lower() == "true"
+            stype = "transaction" if _is_transaction_row(row) else "request"
 
-            totals["samples"] += 1
-            totals["elapsed"].append(elapsed)
-            if not success:
-                totals["errors"] += 1
-            if ts > 0:
-                totals["per_second"][ts // 1000] += 1
-
-            bucket = totals["by_label"][label]
+            bucket = totals["by_label"][(label, stype)]
             bucket["samples"] += 1
             bucket["elapsed"].append(elapsed)
             if not success:
                 bucket["errors"] += 1
+            if ts > 0:
+                bucket["per_second"][ts // 1000] += 1
+
+            # 全局口径只计 request 行，避免事务父样本与子请求双计
+            if stype == "request":
+                totals["samples"] += 1
+                totals["elapsed"].append(elapsed)
+                if not success:
+                    totals["errors"] += 1
+                if ts > 0:
+                    totals["per_second"][ts // 1000] += 1
+
+    # 兜底：整份 JTL 无 request 行（如父样本模式关闭 subresults）时，
+    # 全局口径回退为全量计入并告警，避免汇总归零
+    if totals["samples"] == 0 and totals["by_label"]:
+        logger.warning("JTL 无 request 行，全局汇总回退为含事务行")
+        for (_label, stype), bucket in totals["by_label"].items():
+            if stype != "transaction":
+                continue
+            totals["samples"] += bucket["samples"]
+            totals["elapsed"].extend(bucket["elapsed"])
+            totals["errors"] += bucket["errors"]
+            for sec, cnt in bucket["per_second"].items():
+                totals["per_second"][sec] += cnt
     return totals
 
 
 def _build_summary(parsed: dict, failed: bool) -> dict:
     """把中间态聚合成协议约定的 summary 结构。"""
     by_label = []
-    for label, stats in parsed["by_label"].items():
+    for (label, stype), stats in parsed["by_label"].items():
+        max_tps = max(stats["per_second"].values()) if stats["per_second"] else 0
         by_label.append(
             {
                 "label": label,
+                "sample_type": stype,
                 "samples": stats["samples"],
                 "errors": stats["errors"],
                 "p95_rt": _percentile_95(stats["elapsed"]),
-                "max_tps": 0.0,  # label 级 max_tps 需独立 per_second，骨架暂不上报
+                "max_tps": float(max_tps),
             }
         )
     by_label.sort(key=lambda x: x["samples"], reverse=True)
@@ -179,8 +230,13 @@ def _empty_increment() -> dict:
     }
 
 
-def _parse_csv_increment_sync(jtl_path: str, last_offset: int) -> tuple[dict, int]:
+def _parse_csv_increment_sync(
+    jtl_path: str, last_offset: int, state: dict | None = None
+) -> tuple[dict, int]:
     """同步增量解析，返回 (本批聚合结果, 新 offset)。
+
+    state：调用方跨批持有的可变 dict，记忆「本次 run 是否出现过 request 行」，
+    用于全事务配置下的全局口径兜底；传 None 时按单批独立处理。
 
     offset 语义：绝对文件位置。首次（last_offset=0 或 < header_end）从 header 后开始；
     后续从 last_offset 起，跳过残行（offset 落在行中间时丢弃不完整行）。
@@ -229,16 +285,9 @@ def _parse_csv_increment_sync(jtl_path: str, last_offset: int) -> tuple[dict, in
             continue
         label = row.get("label") or "_total"
         success = (row.get("success") or "").lower() == "true"
+        stype = "transaction" if _is_transaction_row(row) else "request"
 
-        result["samples"] += 1
-        result["elapsed"].append(elapsed)
-        result["threads"] = max(result["threads"], all_threads)
-        if not success:
-            result["errors"] += 1
-        if ts > 0:
-            result["per_second"][ts // 1000] += 1
-
-        bucket = result["by_label"][label]
+        bucket = result["by_label"][(label, stype)]
         bucket["samples"] += 1
         bucket["elapsed"].append(elapsed)
         bucket["threads"] = max(bucket["threads"], all_threads)
@@ -246,6 +295,37 @@ def _parse_csv_increment_sync(jtl_path: str, last_offset: int) -> tuple[dict, in
             bucket["errors"] += 1
         if ts > 0:
             bucket["per_second"][ts // 1000] += 1
+
+        # 全局口径只计 request 行，避免事务父样本与子请求双计
+        if stype == "request":
+            result["samples"] += 1
+            result["elapsed"].append(elapsed)
+            result["threads"] = max(result["threads"], all_threads)
+            if not success:
+                result["errors"] += 1
+            if ts > 0:
+                result["per_second"][ts // 1000] += 1
+
+    # 运行期兜底：本次 run 从未出现过 request 行（如父样本模式关闭 subresults）
+    # 且本批只有事务行时，全局口径回退为全量计入并告警，避免实时曲线全程为零。
+    # 混合场景下某一批可能只含事务行（父行落在批边界之后），此时不上报全局，
+    # 防止与前一批已计入的子请求行双计。
+    if state is None:
+        state = {}
+    if result["samples"] > 0:
+        state["saw_request"] = True
+    elif any(key[1] == "transaction" for key in result["by_label"]):
+        if not state.get("saw_request"):
+            logger.warning("JTL 增量无 request 行，全局口径回退为含事务行")
+            for (_label, stype), bucket in result["by_label"].items():
+                if stype != "transaction":
+                    continue
+                result["samples"] += bucket["samples"]
+                result["elapsed"].extend(bucket["elapsed"])
+                result["threads"] = max(result["threads"], bucket["threads"])
+                result["errors"] += bucket["errors"]
+                for sec, cnt in bucket["per_second"].items():
+                    result["per_second"][sec] += cnt
 
     return result, new_offset
 
@@ -260,12 +340,13 @@ def _build_increment_metrics(parsed: dict, interval_s: int) -> dict:
     err_rate = parsed["errors"] / samples if samples else 0.0
 
     by_label = []
-    for label, stats in parsed["by_label"].items():
+    for (label, stype), stats in parsed["by_label"].items():
         lbl_samples = stats["samples"]
         lbl_elapsed = stats["elapsed"]
         by_label.append(
             {
                 "label": label,
+                "sample_type": stype,
                 "samples": lbl_samples,
                 "interval_tps": lbl_samples / interval_s if interval_s > 0 else 0.0,
                 "avg_rt": sum(lbl_elapsed) / len(lbl_elapsed) if lbl_elapsed else 0.0,
@@ -290,16 +371,18 @@ def _build_increment_metrics(parsed: dict, interval_s: int) -> dict:
 
 
 async def parse_increment(
-    jtl_path: str, last_offset: int = 0, interval_s: int = 5
+    jtl_path: str, last_offset: int = 0, interval_s: int = 5, state: dict | None = None
 ) -> tuple[dict, int]:
     """异步增量解析入口，返回 (MSG_METRICS 协议字段, 新 offset)。
 
     供 _metrics_loop 周期调用：每次传上次返回的 new_offset，只处理新增行。
+    state 为调用方跨批持有的可变 dict（记忆是否出现过 request 行，供全事务
+    配置下的全局口径兜底），传 None 时按单批独立处理。
     返回的 metrics dict 不含 run_no，由调用方补。
     """
     if not Path(jtl_path).exists():
         return _build_increment_metrics(_empty_increment(), interval_s), last_offset
     parsed, new_offset = await asyncio.to_thread(
-        _parse_csv_increment_sync, jtl_path, last_offset
+        _parse_csv_increment_sync, jtl_path, last_offset, state
     )
     return _build_increment_metrics(parsed, interval_s), new_offset

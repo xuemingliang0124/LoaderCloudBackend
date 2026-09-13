@@ -176,7 +176,7 @@ async def test_metrics_run_visibility(client, db_session, monkeypatch) -> None:
     assert r.json()["code"] == 2003
 
     # 成员 viewer → 放行（ES 查询 mock 掉）
-    async def _fake_timeseries(run_no, start, end, interval):
+    async def _fake_timeseries(run_no, start, end, interval, sample_type=None):
         return {"series": []}
 
     monkeypatch.setattr(es_client, "query_timeseries", _fake_timeseries)

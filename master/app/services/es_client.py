@@ -21,6 +21,7 @@ _METRICS_MAPPING = {
             "run_no": {"type": "keyword"},
             "agent_id": {"type": "keyword"},
             "label": {"type": "keyword"},
+            "sample_type": {"type": "keyword"},
             "@timestamp": {"type": "date"},
             "interval_tps": {"type": "float"},
             "avg_rt": {"type": "float"},
@@ -71,7 +72,8 @@ async def write_metrics(doc: dict) -> None:
     ts = int(doc.get("ts") or datetime.now(tz=timezone.utc).timestamp())
     body = {k: v for k, v in doc.items() if k != "ts"}
     body["@timestamp"] = ts * 1000
-    # 无 label 维度时归为整体
+    # 无 label 维度时归为整体；sample_type=request|transaction（事务/请求行级
+    # 区分，Agent 解析 JTL 官方标记所得），_total 聚合文档不带 sample_type
     for item in body.pop("by_label", []) or []:
         await get_es().index(
             index=_metrics_index_for_ts(ts),
@@ -80,7 +82,14 @@ async def write_metrics(doc: dict) -> None:
                 "label": item.get("label", "_total"),
                 **{
                     k: item[k]
-                    for k in ("interval_tps", "avg_rt", "p95_rt", "err_rate", "errors")
+                    for k in (
+                        "sample_type",
+                        "interval_tps",
+                        "avg_rt",
+                        "p95_rt",
+                        "err_rate",
+                        "errors",
+                    )
                     if k in item
                 },
             },
@@ -97,42 +106,53 @@ async def write_summary(run_no: str, summary: dict) -> None:
 
 
 async def query_timeseries(
-    run_no: str, start_ts: int, end_ts: int, interval_s: int = 15
+    run_no: str,
+    start_ts: int,
+    end_ts: int,
+    interval_s: int = 15,
+    sample_type: str | None = None,
 ) -> list[dict]:
-    """按 label 维度聚合时间序列，拍平为前端直接消费的点列表。
+    """按 label（及 sample_type）维度聚合时间序列，拍平为前端直接消费的点列表。
 
-    返回：[{"ts": <unix秒>, "label": str, "tps": float,
-           "avg_rt": float(ms), "error_rate": float(百分比)}]
+    返回：[{"ts": <unix秒>, "label": str, "sample_type": str,
+           "tps": float, "avg_rt": float(ms), "error_rate": float(百分比)}]
+    sample_type 传 request/transaction 时仅聚合对应类型文档；label 与
+    sample_type 二级分桶，事务与取样器同名的曲线不会互相污染。
     注意：ES 中 err_rate 存的是 0~1 比率（errors/samples），此处 *100 转百分比；
-    ts 取 date_histogram 桶 key（epoch 毫秒）//1000，绝对时区无关。
+    ts 取 date_histogram 桶 key（epoch 毫秒）//1000，绝对时区无关；
+    无 sample_type 的文档（_total 聚合文档/旧数据）落入 "_total" 类型桶。
     """
+    filters: list[dict] = [
+        {"term": {"run_no": run_no}},
+        {"range": {"@timestamp": {"gte": start_ts * 1000, "lte": end_ts * 1000}}},
+    ]
+    if sample_type:
+        filters.append({"term": {"sample_type": sample_type}})
     body = {
         "size": 0,
-        "query": {
-            "bool": {
-                "filter": [
-                    {"term": {"run_no": run_no}},
-                    {
-                        "range": {
-                            "@timestamp": {"gte": start_ts * 1000, "lte": end_ts * 1000}
-                        }
-                    },
-                ]
-            }
-        },
+        "query": {"bool": {"filter": filters}},
         "aggs": {
             "by_label": {
                 "terms": {"field": "label", "size": 50},
                 "aggs": {
-                    "over_time": {
-                        "date_histogram": {
-                            "field": "@timestamp",
-                            "fixed_interval": f"{interval_s}s",
+                    "by_type": {
+                        "terms": {
+                            "field": "sample_type",
+                            "size": 3,
+                            "missing": "_total",
                         },
                         "aggs": {
-                            "tps": {"avg": {"field": "interval_tps"}},
-                            "rt": {"avg": {"field": "avg_rt"}},
-                            "err": {"avg": {"field": "err_rate"}},
+                            "over_time": {
+                                "date_histogram": {
+                                    "field": "@timestamp",
+                                    "fixed_interval": f"{interval_s}s",
+                                },
+                                "aggs": {
+                                    "tps": {"avg": {"field": "interval_tps"}},
+                                    "rt": {"avg": {"field": "avg_rt"}},
+                                    "err": {"avg": {"field": "err_rate"}},
+                                },
+                            }
                         },
                     }
                 },
@@ -143,23 +163,26 @@ async def query_timeseries(
         body=body, index=f"{get_settings().es_index_prefix}-metrics-*"
     )
 
-    # 拍平 ES 嵌套聚合为点列表：by_label.buckets[].over_time.buckets[]
+    # 拍平 ES 嵌套聚合为点列表：by_label.buckets[].by_type.buckets[].over_time.buckets[]
     points: list[dict] = []
     for label_bucket in (
         (resp.get("aggregations", {}) or {}).get("by_label", {}).get("buckets", [])
     ):
         label = label_bucket.get("key")
-        for tb in (label_bucket.get("over_time", {}) or {}).get("buckets", []):
-            points.append(
-                {
-                    "ts": int(tb["key"]) // 1000,
-                    "label": label,
-                    "tps": round(tb.get("tps", {}).get("value") or 0.0, 3),
-                    "avg_rt": round(tb.get("rt", {}).get("value") or 0.0, 2),
-                    "error_rate": round(
-                        (tb.get("err", {}).get("value") or 0.0) * 100, 2
-                    ),
-                }
-            )
-    points.sort(key=lambda p: (p["ts"], str(p["label"])))
+        for type_bucket in (label_bucket.get("by_type", {}) or {}).get("buckets", []):
+            stype = type_bucket.get("key")
+            for tb in (type_bucket.get("over_time", {}) or {}).get("buckets", []):
+                points.append(
+                    {
+                        "ts": int(tb["key"]) // 1000,
+                        "label": label,
+                        "sample_type": stype,
+                        "tps": round(tb.get("tps", {}).get("value") or 0.0, 3),
+                        "avg_rt": round(tb.get("rt", {}).get("value") or 0.0, 2),
+                        "error_rate": round(
+                            (tb.get("err", {}).get("value") or 0.0) * 100, 2
+                        ),
+                    }
+                )
+    points.sort(key=lambda p: (p["ts"], str(p["label"]), str(p["sample_type"])))
     return points

@@ -70,8 +70,8 @@
 | `heartbeat` | cpu, mem, net_in, net_out, status, current_run_id | 每 10s；Master 连续 3 次未收到判 OFFLINE |
 | `task_ack` | run_id, accepted, message | 任务确认/拒绝 |
 | `status` | run_id, phase(downloading/running/uploading/finished/failed/stopped), message | 生命周期上报 |
-| `metrics` | run_id, interval_tps, avg_rt, p95_rt, err_rate, threads, by_label[] | 每 5s 一批，Master bulk 写 ES |
-| `result` | run_id, summary, artifacts[] | 最终汇总 + MinIO 产物 key |
+| `metrics` | run_id, interval_tps, avg_rt, p95_rt, err_rate, threads, by_label[{label,sample_type,...}] | 每 5s 一批，Master bulk 写 ES；sample_type=request\|transaction（事务行按 JMeter 官方标记行级判定，全局口径只计 request） |
+| `result` | run_id, summary{...,by_label[{label,sample_type,...}]}, artifacts[] | 最终汇总 + MinIO 产物 key |
 
 ### 4.2 Master → Agent
 
@@ -87,7 +87,7 @@
 
 | 索引 | 内容 | 用途 |
 |---|---|---|
-| `pt-metrics-yyyy.MM.dd` | 5s 粒度时序文档（run_id、agent_id、label 维度） | 实时曲线：date_histogram + terms(label) |
+| `pt-metrics-yyyy.MM.dd` | 5s 粒度时序文档（run_id、agent_id、label、sample_type 维度） | 实时曲线：date_histogram + terms(label, sample_type) |
 | `pt-summary` | 执行汇总：run_no（keyword）、总请求/错误/P50/P90/P95/P99/TPS，多 Agent 按 label 合并去重 | 执行详情页、报告导出 |
 | `pt-agent-logs-yyyy.MM.dd` | Agent/JMeter 关键日志（可选） | 失败排查 |
 

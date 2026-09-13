@@ -194,11 +194,13 @@ class TaskExecutor:
         """
         settings = get_settings()
         last_offset = 0
+        # 跨批记忆「是否出现过 request 行」，供全事务配置下的全局口径兜底
+        parse_state = {"saw_request": False}
         while True:
             await asyncio.sleep(settings.metrics_interval)
             try:
                 metrics, last_offset = await parse_increment(
-                    jtl_path, last_offset, settings.metrics_interval
+                    jtl_path, last_offset, settings.metrics_interval, parse_state
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[{run_id}] 增量解析失败: {exc}")

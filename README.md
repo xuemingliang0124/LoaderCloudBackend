@@ -115,7 +115,7 @@ uvicorn app.main:app --reload
 | `GET /api/v1/projects/{project_id}/runs` | 项目内执行记录列表（分页，经场景归属过滤） |
 | `POST /api/v1/projects/{project_id}/runs/{run_no}/stop` | 停止执行（记录须属于该项目 2003/3022；先置 STOPPING，收齐 Agent 回报或看门狗超时才置 STOPPED） |
 | `WS /ws/runs/{run_no}?token=` | 前端实时通道：指标批次/状态 fan-out，替代轮询 ES；仅项目成员（viewer+）可订阅，无权/记录不存在一律 1008 拒绝 |
-| `GET /api/v1/metrics/timeseries` | ES 按 label 聚合的时间序列曲线；仅项目成员（viewer+）可查（3030），记录不存在 2003 |
+| `GET /api/v1/metrics/timeseries` | ES 按 label 聚合的时间序列曲线，可选 `sample_type=request\|transaction` 过滤；仅项目成员（viewer+）可查（3030），记录不存在 2003 |
 | `POST/GET /api/v1/projects/{project_id}/schedules` | 项目内定时场景（标准 5 段 crontab；场景须属于该项目 3013/3022），支持名称/启用状态过滤 |
 | `POST /api/v1/projects/{project_id}/schedules/{id}/toggle` | 定时任务启停（任务须属于该项目 4002/3022；联动 APScheduler 注册/注销） |
 
@@ -147,6 +147,10 @@ uvicorn app.main:app --reload
 - **心跳判定**：Agent 每 10s 心跳，连续 3 次未收到 → OFFLINE；执行中失联 → run 置异常。
 - **指标与汇聚**：Agent 5s 一批写 `pt-metrics-*`；Master 收齐全部 Agent result
   合并写 `pt-summary-{run_no}` 并置 FINISHED，任一失败置 PARTIAL。
+- **事务/请求区分**：JMeter 事务行按官方标记（responseMessage 含
+  "Number of samples in transaction"）行级识别为 `sample_type=transaction`，
+  与请求（request）分桶上报/聚合；全局 TPS/请求数/p95 只计请求行，
+  避免事务父子样本双计（`/metrics/timeseries` 支持 `sample_type` 过滤）。
 - **产物路径**：MinIO bucket `ptp`，key 规范
   `scripts/{script_id}/{version}/...`、`plugins/{plugin_id}/...`、`runs/{run_no}/...`。
 

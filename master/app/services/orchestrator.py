@@ -384,7 +384,7 @@ def split_threads(total: int, weights: dict[str, int]) -> dict[str, int]:
 
 
 def _merge_summaries(summaries: list[dict]) -> dict:
-    """合并多 Agent 的 summary，按 label 聚合。
+    """合并多 Agent 的 summary，按 (label, sample_type) 聚合。
 
     合并口径：
     - samples/errors：直接累加（各 Agent 独立加压，总量有意义）
@@ -392,10 +392,12 @@ def _merge_summaries(summaries: list[dict]) -> dict:
       延迟分桶或原始延迟数组，留 P2）
     - max_tps：取 max（峰值不累加，因各 Agent 时间轴可能错峰；真实聚合峰值
       需各 Agent 上报 interval 级 tps 序列对齐求和，留 P2）
-    - by_label：union 所有 label，按 samples 降序
+    - by_label：union 所有 (label, sample_type)，按 samples 降序；
+      事务与取样器同名时因 sample_type 不同不会互相污染，旧 Agent 上报
+      缺 sample_type 时按 request 兜底
     """
     totals = {"samples": 0, "errors": 0, "p95_rt": 0.0, "max_tps": 0.0}
-    by_label: dict[str, dict] = {}
+    by_label: dict[tuple[str, str], dict] = {}
     for s in summaries:
         totals["samples"] += int(s.get("samples") or 0)
         totals["errors"] += int(s.get("errors") or 0)
@@ -403,10 +405,12 @@ def _merge_summaries(summaries: list[dict]) -> dict:
         totals["max_tps"] = max(totals["max_tps"], float(s.get("max_tps") or 0.0))
         for item in s.get("by_label") or []:
             label = item.get("label") or "_unknown"
+            stype = item.get("sample_type") or "request"
             bucket = by_label.setdefault(
-                label,
+                (label, stype),
                 {
                     "label": label,
+                    "sample_type": stype,
                     "samples": 0,
                     "errors": 0,
                     "p95_rt": 0.0,
