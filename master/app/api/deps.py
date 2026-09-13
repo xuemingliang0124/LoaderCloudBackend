@@ -43,6 +43,16 @@ async def get_current_user(
     return CurrentUser(username=payload["sub"], role=payload["role"])
 
 
+def ensure_global_admin(user: CurrentUser) -> None:
+    """全局管理员门禁（用户管理等全局能力）：非 admin 拒绝（1010）。
+
+    纯 token role 判定、不触库，供 handler 首行显式调用，
+    保持 401 → 422（query/body 校验）→ 1010 的顺序约定。
+    """
+    if user.role != "admin":
+        raise BusinessError("仅管理员可执行该操作", code=1010)
+
+
 async def ensure_project_access(
     db: AsyncSession, project_id: int, user: CurrentUser, required: str = "viewer"
 ) -> None:

@@ -1,10 +1,10 @@
-"""请求/响应模型：auth / agent / run / script / scenario / schedule / project / member。"""
+"""请求/响应模型：auth / agent / run / script / scenario / schedule / project / member / user。"""
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.enums import ProjectRole, ScenarioType
+from app.models.enums import GlobalRole, ProjectRole, ScenarioType
 
 
 class LoginIn(BaseModel):
@@ -285,6 +285,33 @@ class ProjectOut(BaseModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+    # 当前请求者在项目内的角色（中文：项目管理员/编辑者/观察者），
+    # 由各接口按调用者身份填充，ORM 无此列（默认空串占位）
+    my_role: str = ""
+
+
+class ProjectUpdateIn(BaseModel):
+    """更新项目请求：name 与 description 至少传一项。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_and_require_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        # 与 ProjectIn 口径一致：去除首尾空白，纯空白名称视为非法（422）
+        v = v.strip()
+        if not v:
+            raise ValueError("项目名称不能为空")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "ProjectUpdateIn":
+        if self.name is None and self.description is None:
+            raise ValueError("name 与 description 至少提供一项")
+        return self
 
 
 class MemberGrantIn(BaseModel):
@@ -322,5 +349,56 @@ class MemberOut(BaseModel):
     username: str
     role: str  # 中文角色名（项目管理员/编辑者/观察者）
     granted_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class UserCreateIn(BaseModel):
+    """新建用户请求。"""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "username": "zhangsan",
+                "password": "secret123",
+                "role": "普通用户",
+            }
+        }
+    )
+
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=6, max_length=64)
+    role: GlobalRole
+
+    @field_validator("username")
+    @classmethod
+    def _strip_username(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("用户名不能为空")
+        return v
+
+
+class UserUpdateIn(BaseModel):
+    """用户更新请求：角色与密码至少传一项。"""
+
+    role: GlobalRole | None = None
+    password: str | None = Field(default=None, min_length=6, max_length=64)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "UserUpdateIn":
+        if self.role is None and self.password is None:
+            raise ValueError("role 与 password 至少提供一项")
+        return self
+
+
+class UserOut(BaseModel):
+    """用户响应：不含密码，role 输出中文角色名。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    role: str  # 中文角色名（管理员/普通用户）
     created_at: datetime
     updated_at: datetime

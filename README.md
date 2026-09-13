@@ -65,6 +65,11 @@ uvicorn app.main:app --reload
 - 质量检查：`ruff check .` / `ruff format .`
 - 测试：`pytest`
 - 迁移：`alembic revision --autogenerate -m "xxx"` && `alembic upgrade head`
+- **容器部署自动迁移**：master 镜像入口 `entrypoint.sh` 在 uvicorn 启动前先执行
+  `alembic upgrade head`，迁移失败则容器退出（compose 已用 MySQL healthcheck 保证
+  启动顺序）。应用 lifespan 的 `create_all` 仅作 dev 兜底（只补建新表、不给旧表加列），
+  schema 演进一律以 alembic 为准；新增迁移后重建/重启 master 即可，无需手工进容器。
+  多副本部署时需确保同一时刻仅一个实例执行迁移（当前 compose 单副本）。
 
 ## 关键端点
 
@@ -75,11 +80,19 @@ uvicorn app.main:app --reload
 |---|---|
 | `GET /api/v1/health` | 健康检查 |
 | `POST /api/v1/auth/login` | 登录取 token |
+| `POST /api/v1/users` | 新建用户（仅全局 admin，1010）：用户名重复 1011；角色收中文（管理员/普通用户） |
+| `GET /api/v1/users` | 用户列表（仅 admin）：用户名模糊、角色过滤、分页 |
+| `GET /api/v1/users/{username}` | 用户详情（仅 admin）：不存在 1012 |
+| `PUT /api/v1/users/{username}` | 改角色/密码（仅 admin，两者至少传一项）：不可降级自己 1014、末位 admin 1015 |
+| `DELETE /api/v1/users/{username}` | 删除用户（仅 admin）：不可删除自己 1014、末位 admin 1015；同事务级联清理 project_member |
 | `POST /api/v1/agents/register` | Agent 启动按宿主机 IP 注册/领取固定 agent_id，返回 expected_plugins 清单 |
 | `GET /api/v1/agents` | 压力机列表（分页、关键字、在线状态过滤） |
 | `WS /ws/agent` | Agent 控制通道（注册/心跳/任务/指令/指标） |
 | `POST /api/v1/projects` | 新建项目（名称唯一，重名拒绝 3020；创建者同事务自动成为 owner） |
-| `GET /api/v1/projects` | 项目列表（分页、名称模糊查询） |
+| `GET /api/v1/projects` | 项目列表（分页、名称模糊查询；响应含 my_role=当前用户项目内角色，admin 恒为项目管理员） |
+| `PUT /api/v1/projects/{project_id}` | 更新项目名称/描述（owner+，admin 直通）：至少传一项否则 422；重名 3020；响应含 my_role |
+| `GET /api/v1/projects/{project_id}/delete-precheck` | 删除预检（viewer+）：返回 scripts/scenarios/running_runs/schedule_jobs |
+| `DELETE /api/v1/projects/{project_id}` | 删除项目（owner+）：严格模式存在脚本/场景拒绝 3023；`?force=true` 级联清理场景/执行记录/定时任务/脚本/成员及 MinIO 产物；存在未结束执行任务时 3014（force 也不例外） |
 | `POST /api/v1/projects/{project_id}/members` | 项目成员授权（owner+，admin 直通）：目标用户不存在 3035、重复授权 3032 |
 | `GET /api/v1/projects/{project_id}/members` | 成员列表（viewer+，分页、用户名模糊查询） |
 | `PUT /api/v1/projects/{project_id}/members/{username}` | 变更成员角色（owner+）：成员不存在 3033，创建者不可降级/末位 owner 不可降级 3034 |
@@ -108,6 +121,12 @@ uvicorn app.main:app --reload
 
 ## 领域约定
 
+- **用户管理**：`/api/v1/users` 全套 CRUD 仅全局 admin 可访问（`ensure_global_admin`
+  纯 token 判定 1010）；全局角色 `GlobalRole`（管理员/普通用户，DB 存 admin/user，
+  历史 viewer 按非管理员兼容渲染）。错误码：1010 非管理员 / 1011 用户名重复 /
+  1012 用户不存在 / 1014 不可降级或删除自己 / 1015 至少保留一个管理员；非法角色、
+  密码 < 6 位、更新体为空均 422。删除用户在同事务级联清理 project_member，
+  项目因此失去唯一 owner 时由 admin 事后补授权。
 - **项目级权限**：双层角色——`sys_user.role` 全局（admin 超管仅校验项目存在）+
   `project_member.role` 项目内 owner/editor/viewer（中文：项目管理员/编辑者/观察者；
   JWT 携带全局 role，成员关系不进 token 保证吊销即时生效）。所有 `/projects/{project_id}/...`
@@ -115,7 +134,10 @@ uvicorn app.main:app --reload
   （读接口 viewer+，写接口 editor+，成员管理 owner+）；项目列表非 admin 仅返回已授权
   项目；run 指标与 WS 订阅按 run_no → 场景 → 项目 校验（viewer+）。成员管理错误码：
   3032 已是成员 / 3033 成员不存在 / 3034 创建者或末位 owner 保护 / 3035 目标用户不存在；
-  非法角色由 Pydantic 枚举校验直接 422。
+  非法角色由 Pydantic 枚举校验直接 422。项目更新/删除要求 owner+；删除遵循
+  「预检 + force 级联」：3023 项目下存在脚本/场景（严格模式），运行中任务 3014
+  （force 也不例外），force 按结果分片 → 执行记录 → 定时任务（含 APScheduler 注销）
+  → 场景（级联脚本关联）→ 脚本 → 项目+成员 顺序清理，MinIO 产物提交后 best-effort。
 - **JMX 参数化**：脚本内占位符 `${__P(key, default)}`，场景存 `param_overrides`
   key-value 覆盖，执行时拼 `-Jkey=value`，不直接改原始 XML。
 - **场景类型**：单交易基准 / 单交易负载 / 混合场景 / 稳定性，四选一；
@@ -164,6 +186,8 @@ uvicorn app.main:app --reload
 - [x] 项目作用域：项目 CRUD（POST/GET /api/v1/projects）；脚本与场景全部接口收敛为 `/projects/{project_id}/...` 嵌套路由（3021 项目不存在 / 3022 跨项目访问），场景引用脚本须同项目，历史数据迁移回填「默认项目」
 - [x] 项目级权限管理：`project_member` 表（迁移 20260913d1 幂等建表并回填 owner）+ JWT 携带全局 role（旧 token 强制重登）+ `ensure_project_access` 收口全部项目接口（3030 非成员 / 3031 角色不足，admin 直通）；建项目自动 owner、项目列表按成员过滤、`/metrics/timeseries` 与 `/ws/runs/{run_no}` 按 run→场景→项目 校验成员可见性
 - [x] 项目成员管理 API：授权/列表/改角色/移除（owner+，admin 直通），角色项目管理员/编辑者/观察者（DB 存英文、API 出中文）；3032 重复授权 / 3033 成员不存在 / 3034 创建者与末位 owner 保护 / 3035 目标用户不存在
+- [x] 用户管理 CRUD：`/api/v1/users` 创建/列表/详情/改角色改密/删除（仅全局 admin），GlobalRole 管理员/普通用户；1010 非管理员 / 1011 重名 / 1012 不存在 / 1014 自保护 / 1015 末位 admin 保护，删用户同事务级联清理 project_member
+- [x] 项目更新/删除：PUT /projects/{id}（owner+，重名 3020）；删除预检 + 严格/force 级联模式（3023 资产阻断、3014 运行中阻断），force 按分片→执行→定时任务→场景→脚本→项目顺序同事务清理，MinIO best-effort
 - [x] 生产压力机离线部署 compose：预构建镜像分发、host 网络、nofile/端口范围调优 — `deploy/docker-compose.agent-prod.yml`
 - [x] 平台侧 compose 增加 Kibana（http://localhost:5601）
 

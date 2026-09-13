@@ -6,6 +6,7 @@ from app.models.base import Base, IntPkMixin, TimestampMixin
 from app.models.enums import (
     AgentPhase,
     AgentStatus,
+    GlobalRole,
     ProjectRole,
     RunStatus,
     RunTrigger,
@@ -30,6 +31,7 @@ __all__ = [
     "AgentStatus",
     "Base",
     "IntPkMixin",
+    "GlobalRole",
     "JmeterPlugin",
     "Project",
     "ProjectMember",

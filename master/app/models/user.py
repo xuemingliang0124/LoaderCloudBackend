@@ -11,4 +11,5 @@ class User(Base, IntPkMixin, TimestampMixin):
 
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(128))
-    role: Mapped[str] = mapped_column(String(32), default="viewer")
+    # 全局角色：admin（管理员）/ user（普通用户）；历史 viewer 同为非管理员
+    role: Mapped[str] = mapped_column(String(32), default="user")

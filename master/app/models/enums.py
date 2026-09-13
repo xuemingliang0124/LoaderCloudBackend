@@ -51,3 +51,14 @@ class ProjectRole(str, Enum):
     OWNER = "项目管理员"
     EDITOR = "编辑者"
     VIEWER = "观察者"
+
+
+class GlobalRole(str, Enum):
+    """sys_user 全局角色。DB 存英文 name 小写（admin/user），API 收/出中文。
+
+    历史数据中的 viewer 与 user 同为非管理员语义（鉴权只判断 == admin），
+    UserOut 输出时统一按非管理员渲染为「普通用户」。
+    """
+
+    ADMIN = "管理员"
+    USER = "普通用户"
