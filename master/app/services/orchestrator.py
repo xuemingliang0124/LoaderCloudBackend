@@ -450,10 +450,12 @@ def _merge_summaries(summaries: list[dict]) -> dict:
     - min_rt：取各 Agent 最小值（只比较 >0 的有效值，缺省 0 视为未上报）；
       真实全零（elapsed 全为 0）时结果同为 0，口径无歧义
     - max_rt：取 max（缺省 0 不影响 max 语义）
+    - avg_rt：按 samples 加权平均（样本多的 Agent 权重大）；旧 Agent 未上报
+      avg_rt 时不参与加权，全部缺失则为 0
     - p95_rt：取 max（保守口径，代表整体瓶颈；跨进程精确 p95 需各 Agent 上报
       延迟分桶或原始延迟数组，留 P2）
-    - max_tps：取 max（峰值不累加，因各 Agent 时间轴可能错峰；真实聚合峰值
-      需各 Agent 上报 interval 级 tps 序列对齐求和，留 P2）
+    - avg_tps：各 Agent 求和（并行加压吞吐率可加；各 Agent 同窗口加压时
+      等价于总 samples/共同墙钟时长）；旧 Agent 缺字段按 0 计
     - by_label：union 所有 (label, sample_type)，按 samples 降序；
       事务与取样器同名时因 sample_type 不同不会互相污染，旧 Agent 上报
       缺 sample_type 时按 request 兜底
@@ -464,9 +466,12 @@ def _merge_summaries(summaries: list[dict]) -> dict:
         "errors": 0,
         "min_rt": 0.0,
         "max_rt": 0.0,
+        "avg_rt": 0.0,
         "p95_rt": 0.0,
-        "max_tps": 0.0,
+        "avg_tps": 0.0,
     }
+    rt_weighted = 0.0
+    rt_weight = 0
     by_label: dict[tuple[str, str], dict] = {}
     for s in summaries:
         samples = int(s.get("samples") or 0)
@@ -476,7 +481,11 @@ def _merge_summaries(summaries: list[dict]) -> dict:
         totals["success"] += int(s.get("success") or (samples - errors))
         totals["max_rt"] = max(totals["max_rt"], float(s.get("max_rt") or 0.0))
         totals["p95_rt"] = max(totals["p95_rt"], float(s.get("p95_rt") or 0.0))
-        totals["max_tps"] = max(totals["max_tps"], float(s.get("max_tps") or 0.0))
+        totals["avg_tps"] += float(s.get("avg_tps") or 0.0)
+        agent_avg_rt = s.get("avg_rt")
+        if agent_avg_rt is not None and samples > 0:
+            rt_weighted += float(agent_avg_rt) * samples
+            rt_weight += samples
         agent_min_rt = float(s.get("min_rt") or 0.0)
         if agent_min_rt > 0 and (
             totals["min_rt"] == 0.0 or agent_min_rt < totals["min_rt"]
@@ -495,8 +504,11 @@ def _merge_summaries(summaries: list[dict]) -> dict:
                     "errors": 0,
                     "min_rt": 0.0,
                     "max_rt": 0.0,
+                    "avg_rt": 0.0,
                     "p95_rt": 0.0,
-                    "max_tps": 0.0,
+                    "avg_tps": 0.0,
+                    "_rt_weighted": 0.0,
+                    "_rt_weight": 0,
                 },
             )
             lbl_samples = int(item.get("samples") or 0)
@@ -506,25 +518,33 @@ def _merge_summaries(summaries: list[dict]) -> dict:
             bucket["success"] += int(item.get("success") or (lbl_samples - lbl_errors))
             bucket["max_rt"] = max(bucket["max_rt"], float(item.get("max_rt") or 0.0))
             bucket["p95_rt"] = max(bucket["p95_rt"], float(item.get("p95_rt") or 0.0))
-            bucket["max_tps"] = max(
-                bucket["max_tps"], float(item.get("max_tps") or 0.0)
-            )
+            bucket["avg_tps"] += float(item.get("avg_tps") or 0.0)
+            lbl_avg_rt = item.get("avg_rt")
+            if lbl_avg_rt is not None and lbl_samples > 0:
+                bucket["_rt_weighted"] += float(lbl_avg_rt) * lbl_samples
+                bucket["_rt_weight"] += lbl_samples
             lbl_min_rt = float(item.get("min_rt") or 0.0)
             if lbl_min_rt > 0 and (
                 bucket["min_rt"] == 0.0 or lbl_min_rt < bucket["min_rt"]
             ):
                 bucket["min_rt"] = lbl_min_rt
-    by_label_sorted = sorted(
-        by_label.values(), key=lambda x: x["samples"], reverse=True
-    )
+    totals["avg_rt"] = rt_weighted / rt_weight if rt_weight else 0.0
+    by_label_out = []
+    for bucket in by_label.values():
+        weight = bucket.pop("_rt_weight")
+        weighted = bucket.pop("_rt_weighted")
+        bucket["avg_rt"] = weighted / weight if weight else 0.0
+        by_label_out.append(bucket)
+    by_label_sorted = sorted(by_label_out, key=lambda x: x["samples"], reverse=True)
     return {
         "samples": totals["samples"],
         "success": totals["success"],
         "errors": totals["errors"],
         "min_rt": totals["min_rt"],
         "max_rt": totals["max_rt"],
+        "avg_rt": totals["avg_rt"],
         "p95_rt": totals["p95_rt"],
-        "max_tps": totals["max_tps"],
+        "avg_tps": totals["avg_tps"],
         "by_label": by_label_sorted,
     }
 

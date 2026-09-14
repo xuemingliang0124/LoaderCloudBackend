@@ -103,7 +103,7 @@ class TaskExecutor:
                 run_id, jtl_path, report_dir, data.get("upload") or {}
             )
 
-            # 解析 JTL 生成真实汇总（samples/errors/p95/max_tps/by_label）
+            # 解析 JTL 生成真实汇总（samples/errors/avg_rt/p95/avg_tps/by_label）
             # 即便停止也把已采集样本汇总上报，summary.failed 单独标记
             summary = await parse_summary(jtl_path, failed=self._stopping)
             if self._stopping:

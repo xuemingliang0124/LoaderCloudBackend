@@ -29,6 +29,7 @@ def _auth(username: str, role: str = "viewer") -> dict:
         ("POST", "/api/v1/projects/1/runs"),
         ("POST", "/api/v1/projects/1/runs/R20260913000001/stop"),
         ("GET", "/api/v1/runs/R20260913000001/summary"),
+        ("GET", "/api/v1/runs/R20260913000001/realtime-summary"),
     ],
 )
 async def test_scoped_run_endpoints_require_token(method: str, path: str) -> None:
@@ -244,8 +245,9 @@ async def test_run_summary_passthrough_on_hit(client, db_session, monkeypatch):
             "errors": 1,
             "min_rt": 100.0,
             "max_rt": 300.0,
+            "avg_rt": 200.0,
             "p95_rt": 300.0,
-            "max_tps": 2.0,
+            "avg_tps": 2.0,
             "failed": False,
             "by_label": [
                 {
@@ -256,8 +258,9 @@ async def test_run_summary_passthrough_on_hit(client, db_session, monkeypatch):
                     "errors": 1,
                     "min_rt": 100.0,
                     "max_rt": 300.0,
+                    "avg_rt": 200.0,
                     "p95_rt": 300.0,
-                    "max_tps": 2.0,
+                    "avg_tps": 2.0,
                 }
             ],
         },
@@ -274,5 +277,115 @@ async def test_run_summary_passthrough_on_hit(client, db_session, monkeypatch):
     await _seed_run(db_session, pid, "R20260913100014")
 
     r = await client.get("/api/v1/runs/R20260913100014/summary", headers=_auth("alice"))
+    assert r.status_code == 200
+    assert r.json()["data"] == doc
+
+
+# ---------- 执行期实时汇总（扁平路由 /runs/{run_no}/realtime-summary，ES mock） ----------
+
+
+async def test_realtime_summary_missing_run_rejected_2003(client) -> None:
+    """run_no 不存在：ensure_run_visible 返回 2003。"""
+    r = await client.get(
+        "/api/v1/runs/R-REALTIME-MISSING/realtime-summary", headers=_auth("alice")
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == 2003
+
+
+async def test_realtime_summary_non_member_rejected_3030(
+    client, db_session
+) -> None:
+    """非项目成员：3030。"""
+    pid = await _create_project(client, "项目A")
+    await _seed_run(db_session, pid, "R20260913100021")
+
+    r = await client.get(
+        "/api/v1/runs/R20260913100021/realtime-summary", headers=_auth("eve")
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == 3030
+
+
+async def test_realtime_summary_empty_returns_zeros(client, db_session, monkeypatch):
+    """执行中无 metrics 文档：返回全零汇总（不抛 2004，与终态 /summary 区别）。"""
+
+    async def _fake_empty(run_no: str) -> dict:
+        return {
+            "samples": 0,
+            "success": 0,
+            "errors": 0,
+            "min_rt": 0.0,
+            "max_rt": 0.0,
+            "avg_rt": 0.0,
+            "p95_rt": 0.0,
+            "avg_tps": 0.0,
+            "by_label": [],
+        }
+
+    monkeypatch.setattr(es_client, "query_realtime_summary", _fake_empty)
+    pid = await _create_project(client, "项目A")
+    await _seed_run(db_session, pid, "R20260913100022")
+
+    r = await client.get(
+        "/api/v1/runs/R20260913100022/realtime-summary", headers=_auth("alice")
+    )
+    assert r.status_code == 200
+    data = r.json()["data"]
+    assert data["samples"] == 0
+    assert data["avg_tps"] == 0.0
+    assert data["by_label"] == []
+
+
+async def test_realtime_summary_passthrough_on_hit(client, db_session, monkeypatch):
+    """命中 metrics：原样透出 ES 聚合结果。"""
+    doc = {
+        "samples": 100,
+        "success": 95,
+        "errors": 5,
+        "min_rt": 50.0,
+        "max_rt": 500.0,
+        "avg_rt": 150.0,
+        "p95_rt": 300.0,
+        "avg_tps": 10.0,
+        "by_label": [
+            {
+                "label": "下单",
+                "sample_type": "request",
+                "samples": 60,
+                "success": 57,
+                "errors": 3,
+                "min_rt": 50.0,
+                "max_rt": 400.0,
+                "avg_rt": 120.0,
+                "p95_rt": 250.0,
+                "avg_tps": 6.0,
+            },
+            {
+                "label": "查询",
+                "sample_type": "request",
+                "samples": 40,
+                "success": 38,
+                "errors": 2,
+                "min_rt": 60.0,
+                "max_rt": 500.0,
+                "avg_rt": 200.0,
+                "p95_rt": 300.0,
+                "avg_tps": 4.0,
+            },
+        ],
+    }
+
+    async def _fake_hit(run_no: str) -> dict:
+        assert run_no == "R20260913100023"
+        return doc
+
+    monkeypatch.setattr(es_client, "query_realtime_summary", _fake_hit)
+    pid = await _create_project(client, "项目A")
+    await _seed_run(db_session, pid, "R20260913100023")
+
+    r = await client.get(
+        "/api/v1/runs/R20260913100023/realtime-summary", headers=_auth("alice")
+    )
     assert r.status_code == 200
     assert r.json()["data"] == doc

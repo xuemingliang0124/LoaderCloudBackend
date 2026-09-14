@@ -7,7 +7,7 @@
 
 from datetime import datetime, timezone
 
-from elasticsearch import AsyncElasticsearch
+from elasticsearch import AsyncElasticsearch, BadRequestError
 from loguru import logger
 
 from app.core.config import get_settings
@@ -37,6 +37,19 @@ _METRICS_MAPPING = {
     },
 }
 
+# pt-summary 索引的显式 mapping。run_no 必须 keyword，否则 term 查询无法
+# 精确匹配（text 字段会被标准分词器拆分 'r...-xxxxx' 为多个 token）。
+# 历史已创建的 pt-summary 索引无 mapping，由 ensure_indices 用 put_mapping
+# 兜底；但对已存在的 text 字段无法改类型，仍需重建索引修复存量数据。
+_SUMMARY_MAPPING = {
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "mappings": {
+        "properties": {
+            "run_no": {"type": "keyword"},
+        }
+    },
+}
+
 
 def get_es() -> AsyncElasticsearch:
     global _es
@@ -49,7 +62,8 @@ async def ensure_indices() -> None:
     """创建索引模板与汇总索引（幂等，启动期调用）。
 
     模板用 PUT 覆盖写入（幂等 upsert），保证代码中的最新映射始终生效；
-    汇总索引做存在性检查后再建。
+    汇总索引做存在性检查后再建（带显式 mapping），已存在的索引用
+    put_mapping 兜底（对已存在的 text 字段无法改类型，仅新增字段生效）。
     """
     settings = get_settings()
     es = get_es()
@@ -60,8 +74,26 @@ async def ensure_indices() -> None:
         template=_METRICS_MAPPING,
     )
     logger.info(f"已写入指标索引模板 {template_name}")
-    if not await es.indices.exists(index=settings.summary_index):
-        await es.indices.create(index=settings.summary_index)
+    summary_props = _SUMMARY_MAPPING["mappings"]["properties"]
+    if await es.indices.exists(index=settings.summary_index):
+        # 对已存在索引做 mapping 兜底：能新增字段，但 run_no 若已被动态
+        # 映射成 text 则 put_mapping 会抛 BadRequestError（ES 不允许改字段
+        # 类型）。此时降级为 warning——query_summary 用 match_phrase 在
+        # text 字段上同样能工作，无需重建索引即可正常查询。
+        try:
+            await es.indices.put_mapping(
+                index=settings.summary_index, properties=summary_props
+            )
+            logger.info(f"已同步汇总索引 mapping {settings.summary_index}")
+        except BadRequestError as exc:
+            logger.warning(
+                f"汇总索引 {settings.summary_index} mapping 同步失败（已存在字"
+                f"段类型冲突，查询降级 match_phrase 不影响功能）：{exc}"
+            )
+    else:
+        await es.indices.create(
+            index=settings.summary_index, body=_SUMMARY_MAPPING
+        )
         logger.info(f"已创建汇总索引 {settings.summary_index}")
 
 
@@ -115,12 +147,18 @@ async def write_summary(run_no: str, summary: dict) -> None:
 async def query_summary(run_no: str) -> dict | None:
     """按 run_no 读取 pt-summary 汇总文档（write_summary 写入结构原样透出）。
 
-    run 每次收官只写一条，term 查询 size=1 足够；无文档（执行尚未结束、
-    历史数据缺失或 ES 丢数）返回 None，由调用方区分提示。
+    run 每次收官只写一条，size=1 足够；无文档（执行尚未结束、历史数据
+    缺失或 ES 丢数）返回 None，由调用方区分提示。
     返回体剥离 run_no（路径已携带）。
+
+    查询用 match_phrase 而非 term：历史 pt-summary 索引在显式 mapping
+    引入前已被 ES 动态映射为 text（标准分词器按 '-' 拆分），term 查 text
+    字段无法精确匹配整串；match_phrase 在 text 字段上做分词后的短语匹配
+    （要求 token 序列与位置完全一致），在 keyword 字段上整串匹配，
+    对存量 text 索引与新建 keyword 索引均兼容。
     """
     resp = await get_es().search(
-        body={"size": 1, "query": {"term": {"run_no": run_no}}},
+        body={"size": 1, "query": {"match_phrase": {"run_no": run_no}}},
         index=get_settings().summary_index,
     )
     hits = (resp.get("hits", {}) or {}).get("hits", []) or []
@@ -129,6 +167,187 @@ async def query_summary(run_no: str) -> dict | None:
     src = dict(hits[0].get("_source", {}) or {})
     src.pop("run_no", None)
     return src
+
+
+async def query_realtime_summary(run_no: str) -> dict:
+    """对 pt-metrics-* 做一次聚合，返回与终态 summary 同结构的实时汇总。
+
+    口径：
+    - samples/success/errors：sum（与终态一致）
+    - min_rt/max_rt：min/max（与终态一致；0 视为未上报，但 min 口径取 ES
+      原值，出现 0 时如实返回，调用方需自行容错）
+    - avg_rt：按 samples 加权（sum(avg_rt*samples)/sum(samples)），与终态一致
+    - p95_rt：用 ES tdigest percentiles 聚合，近似值（与 Agent 终态精确值
+      通常偏差 <1%，仅作实时观察用）
+    - avg_tps：窗口口径 sum(samples)*1000/(max(@timestamp)-min(@timestamp))，
+      与 Agent 终态 _avg_tps 一致；无样本或时间窗口 ≤0 时为 0
+    - by_label：按 (label, sample_type) 二级分桶，与终态结构对齐；
+      排除 _total 行（其数据已并入顶层聚合）
+    返回结构：{samples,success,errors,min_rt,max_rt,avg_rt,p95_rt,avg_tps,
+              by_label[{label,sample_type,samples,success,errors,
+                         min_rt,max_rt,avg_rt,p95_rt,avg_tps}]}
+    无任何 metrics 文档时返回全零汇总（不抛异常，由调用方决定如何呈现）。
+    """
+    # 顶层聚合：跨所有 label（含 _total）的总量、窗口、p95
+    body = {
+        "size": 0,
+        "query": {"term": {"run_no": run_no}},
+        "aggs": {
+            # 仅聚合非 _total 文档，避免顶层与 by_label 双计
+            "non_total": {
+                "filter": {"bool": {"must_not": [{"term": {"label": "_total"}}]}},
+                "aggs": {
+                    "samples": {"sum": {"field": "samples"}},
+                    "success": {"sum": {"field": "success"}},
+                    "errors": {"sum": {"field": "errors"}},
+                    "min_rt": {"min": {"field": "min_rt"}},
+                    "max_rt": {"max": {"field": "max_rt"}},
+                    "p95_rt": {
+                        "percentiles": {
+                            "field": "p95_rt",
+                            "percents": [95],
+                            "tdigest": {"compression": 100},
+                        }
+                    },
+                    "first_ts": {"min": {"field": "@timestamp"}},
+                    "last_ts": {"max": {"field": "@timestamp"}},
+                    # 加权平均 avg_rt：avg_rt*samples 求和 / samples 求和
+                    "rt_weighted": {
+                        "sum": {
+                            "script": {
+                                "source": "doc['avg_rt'].size()==0 || "
+                                "doc['samples'].size()==0 ? 0 : "
+                                "doc['avg_rt'].value * doc['samples'].value",
+                            }
+                        }
+                    },
+                    "by_label": {
+                        "terms": {"field": "label", "size": 50},
+                        "aggs": {
+                            "by_type": {
+                                "terms": {
+                                    "field": "sample_type",
+                                    "size": 3,
+                                    "missing": "request",
+                                },
+                                "aggs": {
+                                    "samples": {"sum": {"field": "samples"}},
+                                    "success": {"sum": {"field": "success"}},
+                                    "errors": {"sum": {"field": "errors"}},
+                                    "min_rt": {"min": {"field": "min_rt"}},
+                                    "max_rt": {"max": {"field": "max_rt"}},
+                                    "p95_rt": {
+                                        "percentiles": {
+                                            "field": "p95_rt",
+                                            "percents": [95],
+                                        }
+                                    },
+                                    "first_ts": {"min": {"field": "@timestamp"}},
+                                    "last_ts": {"max": {"field": "@timestamp"}},
+                                    "rt_weighted": {
+                                        "sum": {
+                                            "script": {
+                                                "source": "doc['avg_rt'].size()==0 "
+                                                "|| doc['samples'].size()==0 ? 0 "
+                                                ": doc['avg_rt'].value * "
+                                                "doc['samples'].value",
+                                            }
+                                        }
+                                    },
+                                },
+                            }
+                        },
+                    },
+                },
+            }
+        },
+    }
+    resp = await get_es().search(
+        body=body, index=f"{get_settings().es_index_prefix}-metrics-*"
+    )
+    non_total = (
+        (resp.get("aggregations", {}) or {}).get("non_total", {}) or {}
+    )
+    samples = int(non_total.get("samples", {}).get("value") or 0)
+    success = int(non_total.get("success", {}).get("value") or 0)
+    errors = int(non_total.get("errors", {}).get("value") or 0)
+    min_rt = float(non_total.get("min_rt", {}).get("value") or 0.0)
+    max_rt = float(non_total.get("max_rt", {}).get("value") or 0.0)
+    rt_weighted = float(non_total.get("rt_weighted", {}).get("value") or 0.0)
+    avg_rt = rt_weighted / samples if samples > 0 else 0.0
+    p95_values = (
+        (non_total.get("p95_rt", {}) or {}).get("values", {}) or {}
+    )
+    p95_rt = float(p95_values.get("95.0") or 0.0)
+    first_ts = non_total.get("first_ts", {}).get("value")
+    last_ts = non_total.get("last_ts", {}).get("value")
+    avg_tps = _avg_tps_from_window(samples, first_ts, last_ts)
+
+    by_label: list[dict] = []
+    for label_bucket in (non_total.get("by_label", {}) or {}).get("buckets", []):
+        label = label_bucket.get("key")
+        for type_bucket in (label_bucket.get("by_type", {}) or {}).get(
+            "buckets", []
+        ):
+            lbl_samples = int(type_bucket.get("samples", {}).get("value") or 0)
+            lbl_errors = int(type_bucket.get("errors", {}).get("value") or 0)
+            lbl_success = int(type_bucket.get("success", {}).get("value") or 0)
+            lbl_rt_weighted = float(
+                type_bucket.get("rt_weighted", {}).get("value") or 0.0
+            )
+            lbl_p95_values = (
+                (type_bucket.get("p95_rt", {}) or {}).get("values", {}) or {}
+            )
+            lbl_first_ts = type_bucket.get("first_ts", {}).get("value")
+            lbl_last_ts = type_bucket.get("last_ts", {}).get("value")
+            by_label.append(
+                {
+                    "label": label,
+                    "sample_type": type_bucket.get("key"),
+                    "samples": lbl_samples,
+                    "success": lbl_success,
+                    "errors": lbl_errors,
+                    "min_rt": float(
+                        type_bucket.get("min_rt", {}).get("value") or 0.0
+                    ),
+                    "max_rt": float(
+                        type_bucket.get("max_rt", {}).get("value") or 0.0
+                    ),
+                    "avg_rt": lbl_rt_weighted / lbl_samples
+                    if lbl_samples > 0
+                    else 0.0,
+                    "p95_rt": float(lbl_p95_values.get("95.0") or 0.0),
+                    "avg_tps": _avg_tps_from_window(
+                        lbl_samples, lbl_first_ts, lbl_last_ts
+                    ),
+                }
+            )
+    by_label.sort(key=lambda x: x["samples"], reverse=True)
+    return {
+        "samples": samples,
+        "success": success,
+        "errors": errors,
+        "min_rt": round(min_rt, 2),
+        "max_rt": round(max_rt, 2),
+        "avg_rt": round(avg_rt, 2),
+        "p95_rt": round(p95_rt, 2),
+        "avg_tps": round(avg_tps, 2),
+        "by_label": by_label,
+    }
+
+
+def _avg_tps_from_window(samples: int, first_ts: float | None, last_ts: float | None) -> float:
+    """窗口口径 TPS：samples*1000/(last_ts-first_ts)，时间单位 ms。
+
+    与 Agent 终态 jtl_parser._avg_tps 一致：用首末样本时间戳作为窗口边界。
+    无样本或时间窗口 ≤0 时返回 0（首末样本同毫秒也视为无效窗口）。
+    """
+    if samples <= 0 or first_ts is None or last_ts is None:
+        return 0.0
+    duration_ms = float(last_ts) - float(first_ts)
+    if duration_ms <= 0:
+        return 0.0
+    return samples * 1000.0 / duration_ms
 
 
 async def query_timeseries(

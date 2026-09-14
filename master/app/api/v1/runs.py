@@ -145,7 +145,7 @@ async def get_run_summary(
     """执行终态汇总（ES pt-summary 原样透出，扁平路由：run_no 全局唯一）。
 
     返回 {agents, failed_agents, summary{samples,success,errors,min_rt,max_rt,
-    p95_rt,max_tps,failed,by_label[...]}, artifacts, stopped}；
+    avg_rt,p95_rt,avg_tps,failed,by_label[...]}, artifacts, stopped}；
     可见性与 /metrics/timeseries 一致（ensure_run_visible）；
     汇总未生成（执行中 PENDING/RUNNING/STOPPING）或文档缺失返回 2004。
     """
@@ -161,3 +161,24 @@ async def get_run_summary(
             raise BusinessError("执行尚未结束，汇总未生成", code=2004)
         raise BusinessError("执行汇总不存在", code=2004)
     return ok(summary)
+
+
+@router.get("/runs/{run_no}/realtime-summary")
+async def get_run_realtime_summary(
+    run_no: str,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """执行期实时汇总（ES pt-metrics-* 聚合，扁平路由：run_no 全局唯一）。
+
+    与终态 /summary 的差异：
+    - 执行中也能查（不返回 2004），无 metrics 文档时返回全零汇总；
+    - 口径基于 5s 粒度 metrics 聚合：samples/success/errors 求和、
+      min/max 直接取、avg_rt 按 samples 加权、p95 用 tdigest 近似值、
+      avg_tps 用窗口口径（首末批 @timestamp）；
+    - 不含 agents/failed_agents/artifacts/stopped 字段（这些是终态专有）；
+    - 终态后建议改用 /summary（精确值，p95/avg_tps 口径与 Agent 终态一致）。
+    可见性与 /metrics/timeseries 一致（ensure_run_visible）。
+    """
+    await ensure_run_visible(db, run_no, user)
+    return ok(await es_client.query_realtime_summary(run_no))

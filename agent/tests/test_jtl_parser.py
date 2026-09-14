@@ -73,8 +73,11 @@ def test_summary_same_label_request_and_transaction_separated(tmp_path: Path):
     assert summary["samples"] == 2
     by_key = {(x["label"], x["sample_type"]): x for x in summary["by_label"]}
     assert set(by_key.keys()) == {("下单", "request"), ("下单", "transaction")}
-    # label 级 max_tps 由 per_second 真实计算（此前骨架恒 0）
-    assert by_key[("下单", "request")]["max_tps"] >= 1.0
+    # label 级 avg_tps：首请求 000+100ms 起、末请求 300+200ms 止，
+    # 墙钟 500ms 内 2 个请求 → 4.0 TPS；avg_rt=(100+200)/2=150
+    req = by_key[("下单", "request")]
+    assert req["avg_tps"] == 4.0
+    assert req["avg_rt"] == 150.0
 
 
 def test_summary_failed_transaction_classified_and_bucketed(tmp_path: Path):
@@ -131,6 +134,10 @@ def test_summary_min_max_rt_and_success_counts(tmp_path: Path):
     assert summary["success"] == 2
     assert summary["min_rt"] == 100.0
     assert summary["max_rt"] == 300.0
+    # avg_rt=(100+300+200)/3=200；首末请求墙钟 400ms（000 起、200+200 止）
+    # → avg_tps=3*1000/400=7.5
+    assert summary["avg_rt"] == 200.0
+    assert summary["avg_tps"] == 7.5
     req = next(
         x
         for x in summary["by_label"]
@@ -140,6 +147,8 @@ def test_summary_min_max_rt_and_success_counts(tmp_path: Path):
     assert req["errors"] == 1
     assert req["min_rt"] == 100.0
     assert req["max_rt"] == 300.0
+    assert req["avg_rt"] == 200.0
+    assert req["avg_tps"] == 7.5
     tx = next(
         x
         for x in summary["by_label"]
@@ -151,6 +160,7 @@ def test_summary_min_max_rt_and_success_counts(tmp_path: Path):
     assert tx["errors"] == 0
     assert tx["min_rt"] == 500.0
     assert tx["max_rt"] == 500.0
+    assert tx["avg_rt"] == 500.0
 
 
 # ---------- 增量解析 ----------

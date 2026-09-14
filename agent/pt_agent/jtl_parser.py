@@ -12,21 +12,24 @@ JMeter `-l xxx.jtl` 默认输出 CSV（首字符 `<` 时为 XML，仅做 CSV 支
 设计要点：
 - 用 asyncio.to_thread 包装同步 csv 读取，避免阻塞事件循环。
 - p95 用 numpy.percentile 默认 linear 插值口径（不外推越界）。
-- max_tps 用「单秒最大样本数」近似：按 timeStamp 向下取整到秒，统计每秒样本数取 max。
-  JMeter CSV 的 timeStamp 是请求开始时间（毫秒），按它分桶即得 RPS 峰值。
+- avg_tps 用 JMeter 官方 throughput 口径：samples / 活跃墙钟时长，时长取
+  末个请求结束时间（timeStamp+elapsed）与首个请求开始时间（timeStamp）之差，
+  毫秒换算秒；单样本时时长即其自身 elapsed。
+- avg_rt 为 elapsed 算术平均（毫秒），与运行期 MSG_METRICS 的 avg_rt 同口径。
 - 增量 offset 记录绝对文件位置；JMeter 持续追加写入，每次只处理新增行。
   offset 落在行中间时丢弃不完整行（残行），避免解析错位。
 - 事务/请求区分：JMeter 事务控制器生成的样本行在 responseMessage 携带官方标记
   "Number of samples in transaction : N, number of failing samples : M"
   （源码 TransactionSampler.setTransactionDone），失败事务同样携带该标记，
   据此做行级判定（与 label 无关，事务与取样器同名也不歧义）。
-  全局口径（总 samples/TPS/p95/max_tps）只计 request 行，事务行仅进入
+  全局口径（总 samples/TPS/p95/avg_rt）只计 request 行，事务行仅进入
   by_label（sample_type=transaction），避免事务父样本与子请求双计、p95 失真；
   整份 JTL 无 request 行的罕见配置（父样本模式关闭 subresults）下兜底回退
   为全量计入并告警。
 - 指标字段：全局与 by_label 均输出 samples/success/errors（成功/失败笔数）与
-  min_rt/max_rt/p95_rt（响应时间最小/最大/95 分位）；success 由 samples-errors
-  推导，min/max 直接取自已保留的 elapsed 列表（p95 同源，无额外扫描开销）。
+  min_rt/max_rt/avg_rt/p95_rt（响应时间最小/最大/平均/95 分位）及 avg_tps
+  （平均吞吐率）；success 由 samples-errors 推导，min/max 直接取自已保留的
+  elapsed 列表（p95/avg 同源，无额外扫描开销）。
 """
 
 import asyncio
@@ -87,26 +90,29 @@ def _parse_csv_sync(jtl_path: str) -> dict:
     返回结构（内部用，executor 再拼装成协议字段）：
     {
       "samples": int, "errors": int,     # 仅 request 行口径（全为事务时兜底回填）
-      "elapsed": list[int],              # 全局延迟列表（算 p95，仅 request 行）
+      "elapsed": list[int],              # 全局延迟列表（算 avg/p95，仅 request 行）
+      "first_ts": int|None,              # 首个请求开始毫秒（仅 request 行）
+      "last_end": int,                   # 末个请求结束毫秒 ts+elapsed（仅 request 行）
       "by_label": {
-        (label, sample_type): {"samples", "errors", "elapsed", "per_second"}
-      },
-      "per_second": dict[int_second, int_count]   # 算 max_tps（仅 request 行）
+        (label, sample_type): {"samples", "errors", "elapsed", "first_ts", "last_end"}
+      }
     }
     """
     totals = {
         "samples": 0,
         "errors": 0,
         "elapsed": [],
+        "first_ts": None,
+        "last_end": 0,
         "by_label": defaultdict(
             lambda: {
                 "samples": 0,
                 "errors": 0,
                 "elapsed": [],
-                "per_second": defaultdict(int),
+                "first_ts": None,
+                "last_end": 0,
             }
         ),
-        "per_second": defaultdict(int),
     }
     if not _is_csv(jtl_path):
         logger.warning(f"JTL 非格式或不存在，跳过解析: {jtl_path}")
@@ -131,7 +137,9 @@ def _parse_csv_sync(jtl_path: str) -> dict:
             if not success:
                 bucket["errors"] += 1
             if ts > 0:
-                bucket["per_second"][ts // 1000] += 1
+                if bucket["first_ts"] is None or ts < bucket["first_ts"]:
+                    bucket["first_ts"] = ts
+                bucket["last_end"] = max(bucket["last_end"], ts + elapsed)
 
             # 全局口径只计 request 行，避免事务父样本与子请求双计
             if stype == "request":
@@ -140,7 +148,9 @@ def _parse_csv_sync(jtl_path: str) -> dict:
                 if not success:
                     totals["errors"] += 1
                 if ts > 0:
-                    totals["per_second"][ts // 1000] += 1
+                    if totals["first_ts"] is None or ts < totals["first_ts"]:
+                        totals["first_ts"] = ts
+                    totals["last_end"] = max(totals["last_end"], ts + elapsed)
 
     # 兜底：整份 JTL 无 request 行（如父样本模式关闭 subresults）时，
     # 全局口径回退为全量计入并告警，避免汇总归零
@@ -152,16 +162,32 @@ def _parse_csv_sync(jtl_path: str) -> dict:
             totals["samples"] += bucket["samples"]
             totals["elapsed"].extend(bucket["elapsed"])
             totals["errors"] += bucket["errors"]
-            for sec, cnt in bucket["per_second"].items():
-                totals["per_second"][sec] += cnt
+            if bucket["first_ts"] is not None:
+                if totals["first_ts"] is None or bucket["first_ts"] < totals["first_ts"]:
+                    totals["first_ts"] = bucket["first_ts"]
+                totals["last_end"] = max(totals["last_end"], bucket["last_end"])
     return totals
+
+
+def _avg_tps(samples: int, first_ts: int | None, last_end: int) -> float:
+    """JMeter throughput 口径：samples / 活跃墙钟时长（秒）。
+
+    时长 = 末请求结束(ts+elapsed) − 首请求开始(ts)，毫秒换算秒。
+    无有效时间戳（first_ts is None）或时长非正（elapsed 全 0）时返回 0.0。
+    """
+    if first_ts is None:
+        return 0.0
+    duration_ms = last_end - first_ts
+    if duration_ms <= 0:
+        return 0.0
+    return samples * 1000.0 / duration_ms
 
 
 def _build_summary(parsed: dict, failed: bool) -> dict:
     """把中间态聚合成协议约定的 summary 结构。"""
     by_label = []
     for (label, stype), stats in parsed["by_label"].items():
-        max_tps = max(stats["per_second"].values()) if stats["per_second"] else 0
+        lbl_elapsed = stats["elapsed"]
         by_label.append(
             {
                 "label": label,
@@ -169,27 +195,30 @@ def _build_summary(parsed: dict, failed: bool) -> dict:
                 "samples": stats["samples"],
                 "success": stats["samples"] - stats["errors"],
                 "errors": stats["errors"],
-                "min_rt": float(min(stats["elapsed"])) if stats["elapsed"] else 0.0,
-                "max_rt": float(max(stats["elapsed"])) if stats["elapsed"] else 0.0,
-                "p95_rt": _percentile_95(stats["elapsed"]),
-                "max_tps": float(max_tps),
+                "min_rt": float(min(lbl_elapsed)) if lbl_elapsed else 0.0,
+                "max_rt": float(max(lbl_elapsed)) if lbl_elapsed else 0.0,
+                "avg_rt": (
+                    sum(lbl_elapsed) / len(lbl_elapsed) if lbl_elapsed else 0.0
+                ),
+                "p95_rt": _percentile_95(lbl_elapsed),
+                "avg_tps": _avg_tps(
+                    stats["samples"], stats["first_ts"], stats["last_end"]
+                ),
             }
         )
     by_label.sort(key=lambda x: x["samples"], reverse=True)
 
-    max_tps = 0.0
-    if parsed["per_second"]:
-        max_tps = float(max(parsed["per_second"].values()))
-
+    elapsed = parsed["elapsed"]
     return {
         "failed": failed,
         "samples": parsed["samples"],
         "success": parsed["samples"] - parsed["errors"],
         "errors": parsed["errors"],
-        "min_rt": float(min(parsed["elapsed"])) if parsed["elapsed"] else 0.0,
-        "max_rt": float(max(parsed["elapsed"])) if parsed["elapsed"] else 0.0,
-        "p95_rt": _percentile_95(parsed["elapsed"]),
-        "max_tps": max_tps,
+        "min_rt": float(min(elapsed)) if elapsed else 0.0,
+        "max_rt": float(max(elapsed)) if elapsed else 0.0,
+        "avg_rt": sum(elapsed) / len(elapsed) if elapsed else 0.0,
+        "p95_rt": _percentile_95(elapsed),
+        "avg_tps": _avg_tps(parsed["samples"], parsed["first_ts"], parsed["last_end"]),
         "by_label": by_label,
     }
 
@@ -214,8 +243,9 @@ async def parse_summary(jtl_path: str, failed: bool = False) -> dict:
             "errors": 0,
             "min_rt": 0.0,
             "max_rt": 0.0,
+            "avg_rt": 0.0,
             "p95_rt": 0.0,
-            "max_tps": 0.0,
+            "avg_tps": 0.0,
             "by_label": [],
         }
     parsed = await asyncio.to_thread(_parse_csv_sync, jtl_path)
