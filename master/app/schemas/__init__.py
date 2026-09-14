@@ -64,6 +64,8 @@ class RunOut(BaseModel):
     id: int
     run_no: str
     scenario_id: int
+    # ORM 无此列：由接口层按 scenario_id 关联 test_scenario.name 填充
+    scenario_name: str = ""
     status: str
     trigger: str
     agent_ids: list | None

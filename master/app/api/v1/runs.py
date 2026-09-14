@@ -37,7 +37,11 @@ router = APIRouter()
 async def _get_scoped_run(
     db: AsyncSession, project_id: int, run_no: str
 ) -> ScenarioRun:
-    """按项目作用域取执行记录：不存在 2003，跨项目访问 3022。"""
+    """按项目作用域取执行记录：不存在 2003，跨项目访问 3022。
+
+    顺带 attach scenario_name 到 run 对象上，供 RunOut.model_validate 读取
+    （ORM 无此列，from_attributes 模式下从实例属性取值）。
+    """
     run = (
         (await db.execute(select(ScenarioRun).where(ScenarioRun.run_no == run_no)))
         .scalars()
@@ -48,6 +52,7 @@ async def _get_scoped_run(
     scenario = await db.get(Scenario, run.scenario_id)
     if scenario is None or scenario.project_id != project_id:
         raise BusinessError("执行记录不属于指定项目", code=3022)
+    run.scenario_name = scenario.name  # noqa: pydantic-lsp
     return run
 
 
@@ -121,7 +126,7 @@ async def list_runs(
     rows = (
         (
             await db.execute(
-                select(ScenarioRun)
+                select(ScenarioRun, Scenario.name.label("scenario_name"))
                 .join(Scenario, ScenarioRun.scenario_id == Scenario.id)
                 .where(Scenario.project_id == project_id)
                 .order_by(ScenarioRun.id.desc())
@@ -129,10 +134,12 @@ async def list_runs(
                 .limit(page_size)
             )
         )
-        .scalars()
         .all()
     )
-    items = [RunOut.model_validate(r).model_dump(mode="json") for r in rows]
+    items = []
+    for run, scenario_name in rows:
+        run.scenario_name = scenario_name  # noqa: pydantic-lsp
+        items.append(RunOut.model_validate(run).model_dump(mode="json"))
     return ok({"total": int(total or 0), "items": items})
 
 
