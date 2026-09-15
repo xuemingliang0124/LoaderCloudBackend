@@ -33,6 +33,8 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+      # 允许 Prometheus 免鉴权抓取 /minio/v2/metrics/cluster（内网监控用）
+      MINIO_PROMETHEUS_AUTH_TYPE: public
     ports:
       - "9000:9000"
       - "9001:9001"
