@@ -13,6 +13,7 @@ from app.api.v1 import api_router
 from app.core.config import get_settings
 from app.core.log import logger, setup_logging
 from app.db.session import engine
+from app.metrics import setup_metrics
 from app.models import Base
 from app.services import es_client, orchestrator, storage, user_service
 from app.services.agent_registry import mark_stale_agents_offline
@@ -86,6 +87,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title=get_settings().app_name, lifespan=lifespan)
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(ws_router)
+# 必须在路由挂载之后调用，中间件才能从 request.scope["route"] 取路径模板
+setup_metrics(app)
 
 
 @app.exception_handler(BusinessError)

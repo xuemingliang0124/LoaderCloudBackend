@@ -5,12 +5,14 @@
 - pt-summary             执行汇总（run_no 为 keyword，单索引避免小分片泛滥）
 """
 
+import time
 from datetime import datetime, timezone
 
 from elasticsearch import AsyncElasticsearch, BadRequestError
 from loguru import logger
 
 from app.core.config import get_settings
+from app.metrics import record_es_write
 
 _es: AsyncElasticsearch | None = None
 
@@ -104,44 +106,61 @@ def _metrics_index_for_ts(ts_seconds: int) -> str:
 
 async def write_metrics(doc: dict) -> None:
     """写入单条 5s 聚合指标。量级上来后改造为 bulk 批量写。"""
-    ts = int(doc.get("ts") or datetime.now(tz=timezone.utc).timestamp())
-    body = {k: v for k, v in doc.items() if k != "ts"}
-    body["@timestamp"] = ts * 1000
-    # 无 label 维度时归为整体；sample_type=request|transaction（事务/请求行级
-    # 区分，Agent 解析 JTL 官方标记所得），_total 聚合文档不带 sample_type
-    for item in body.pop("by_label", []) or []:
-        await get_es().index(
-            index=_metrics_index_for_ts(ts),
-            document={
-                **body,
-                "label": item.get("label", "_total"),
-                **{
-                    k: item[k]
-                    for k in (
-                        "sample_type",
-                        "interval_tps",
-                        "avg_rt",
-                        "min_rt",
-                        "max_rt",
-                        "p95_rt",
-                        "err_rate",
-                        "samples",
-                        "success",
-                        "errors",
-                    )
-                    if k in item
+    start = time.perf_counter()
+    ok = True
+    try:
+        ts = int(doc.get("ts") or datetime.now(tz=timezone.utc).timestamp())
+        body = {k: v for k, v in doc.items() if k != "ts"}
+        body["@timestamp"] = ts * 1000
+        # 无 label 维度时归为整体；sample_type=request|transaction（事务/请求行级
+        # 区分，Agent 解析 JTL 官方标记所得），_total 聚合文档不带 sample_type
+        for item in body.pop("by_label", []) or []:
+            await get_es().index(
+                index=_metrics_index_for_ts(ts),
+                document={
+                    **body,
+                    "label": item.get("label", "_total"),
+                    **{
+                        k: item[k]
+                        for k in (
+                            "sample_type",
+                            "interval_tps",
+                            "avg_rt",
+                            "min_rt",
+                            "max_rt",
+                            "p95_rt",
+                            "err_rate",
+                            "samples",
+                            "success",
+                            "errors",
+                        )
+                        if k in item
+                    },
                 },
-            },
+            )
+        await get_es().index(
+            index=_metrics_index_for_ts(ts), document={**body, "label": "_total"}
         )
-    await get_es().index(
-        index=_metrics_index_for_ts(ts), document={**body, "label": "_total"}
-    )
+    except Exception:
+        ok = False
+        raise
+    finally:
+        record_es_write("write_metrics", time.perf_counter() - start, ok=ok)
 
 
 async def write_summary(run_no: str, summary: dict) -> None:
-    await get_es().index(
-        index=get_settings().summary_index, document={"run_no": run_no, **summary}
-    )
+    start = time.perf_counter()
+    ok = True
+    try:
+        await get_es().index(
+            index=get_settings().summary_index,
+            document={"run_no": run_no, **summary},
+        )
+    except Exception:
+        ok = False
+        raise
+    finally:
+        record_es_write("write_summary", time.perf_counter() - start, ok=ok)
 
 
 async def query_summary(run_no: str) -> dict | None:

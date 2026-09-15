@@ -104,3 +104,13 @@ def stop_scheduler() -> None:
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+
+
+def get_active_job_count() -> int:
+    """当前注册到 APScheduler 的活跃任务数（供 metrics 抓取）。"""
+    if _scheduler is None:
+        return 0
+    try:
+        return len(_scheduler.get_jobs())
+    except Exception:  # noqa: BLE001
+        return 0

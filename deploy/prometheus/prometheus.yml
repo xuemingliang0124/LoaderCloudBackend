@@ -1,0 +1,43 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+
+  # 宿主机 CPU/内存/磁盘/网络
+  - job_name: node
+    static_configs:
+      - targets: [node-exporter:9100]
+
+  # 容器级 CPU/内存
+  - job_name: cadvisor
+    static_configs:
+      - targets: [cadvisor:8080]
+
+  # MySQL：连接数、QPS、慢查询、InnoDB
+  - job_name: mysql
+    static_configs:
+      - targets: [mysqld-exporter:9104]
+
+  # Elasticsearch：JVM 堆、索引大小、查询延迟
+  - job_name: elasticsearch
+    static_configs:
+      - targets: [elasticsearch-exporter:9114]
+
+  # MinIO 自带 metrics 端点
+  - job_name: minio
+    metrics_path: /minio/v2/metrics/cluster
+    scheme: http
+    static_configs:
+      - targets: [minio:9000]
+
+  # FastAPI Master 应用指标（/metrics 端点）
+  - job_name: master
+    metrics_path: /metrics
+    static_configs:
+      - targets: [master:8000]
+        labels:
+          service: master

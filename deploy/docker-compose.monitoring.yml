@@ -1,0 +1,108 @@
+# 监控层：Prometheus + Grafana + Exporters（独立 compose，叠加启动）
+# 启动：docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml up -d
+# 停止：docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml stop prometheus grafana node-exporter cadvisor mysqld-exporter elasticsearch-exporter
+
+name: ptp
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: ptp-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: ptp-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus]
+
+  # 宿主机 CPU/内存/磁盘/网络
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: ptp-node-exporter
+    restart: unless-stopped
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)
+    ports:
+      - "9100:9100"
+
+  # 容器级 CPU/内存
+  # 两个 Docker Desktop(WSL2) 前置条件：
+  # 1) cgroup: host：默认私有 cgroup namespace 下 cAdvisor 读不到其他容器的
+  #    cgroup.procs，会误判为空 cgroup 而拒绝监控
+  # 2) Docker Desktop 必须关闭 "Use containerd for pulling and storing
+  #    images"（Settings → General）：containerd image store 下存储驱动显示
+  #    为 overlayfs，cAdvisor 找不到 layerdb，所有容器报
+  #    "failed to identify the read-write layer ID" 而无法监控
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: ptp-cadvisor
+    restart: unless-stopped
+    privileged: true
+    cgroup: host
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    ports:
+      - "8080:8080"
+
+  # MySQL：连接数、QPS、慢查询、InnoDB
+  # v0.15.x 已废弃 DATA_SOURCE_NAME 环境变量，必须用命令行参数
+  # 单节点 MySQL 无需复制状态监控，且 MySQL 8.4 已废弃 SHOW SLAVE STATUS
+  # 语法（v0.15.1 仍用旧语法，导致 slave_status scraper 报 SQL 1064）
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: ptp-mysqld-exporter
+    restart: unless-stopped
+    command:
+      - --mysqld.address=mysql:3306
+      - --mysqld.username=ptp:ptp123456
+      - --no-collect.slave_status
+    ports:
+      - "9104:9104"
+    depends_on: [mysql]
+
+  # Elasticsearch：JVM 堆、索引大小、查询延迟
+  elasticsearch-exporter:
+    image: quay.io/prometheuscommunity/elasticsearch-exporter:v1.7.0
+    container_name: ptp-es-exporter
+    restart: unless-stopped
+    command:
+      - --es.uri=http://elasticsearch:9200
+      - --es.all
+      - --es.indices
+      - --es.shards
+    ports:
+      - "9114:9114"
+    depends_on: [elasticsearch]
+
+volumes:
+  prometheus_data:
+  grafana_data:
