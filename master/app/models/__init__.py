@@ -23,6 +23,7 @@ from app.models.scenario import Scenario
 from app.models.scenario_script import ScenarioScript
 from app.models.scenario_script_tg import ScenarioScriptTG
 from app.models.script import Script
+from app.models.transaction import Transaction
 from app.models.user import User
 
 __all__ = [
@@ -49,5 +50,6 @@ __all__ = [
     "ScheduleJob",
     "Script",
     "TimestampMixin",
+    "Transaction",
     "User",
 ]

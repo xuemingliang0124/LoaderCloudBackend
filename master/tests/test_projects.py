@@ -484,6 +484,7 @@ async def test_force_cascade_deletes_all_assets(client, db_session) -> None:
         "force": True,
         "removed_scripts": 1,
         "removed_environments": 0,
+        "removed_transactions": 0,
         "removed_scenarios": 1,
         "removed_runs": 1,
         "removed_schedules": 1,
@@ -493,6 +494,7 @@ async def test_force_cascade_deletes_all_assets(client, db_session) -> None:
     # 全部资产级联清理（每测试独立内存库，逐表计数应为 0）
     from app.models.project import Project
     from app.models.scenario_script_tg import ScenarioScriptTG as TG
+    from app.models.transaction import Transaction
 
     checks: list[tuple[str, object]] = [
         ("test_project", select(Project).where(Project.id == pid)),
@@ -502,6 +504,7 @@ async def test_force_cascade_deletes_all_assets(client, db_session) -> None:
         ),
         ("test_scenario", select(Scenario).where(Scenario.project_id == pid)),
         ("jmeter_script", select(Script).where(Script.project_id == pid)),
+        ("test_transaction", select(Transaction).where(Transaction.project_id == pid)),
         ("scenario_script", select(ScenarioScript)),
         ("scenario_script_tg", select(TG)),
         ("schedule_job", select(ScheduleJob)),
