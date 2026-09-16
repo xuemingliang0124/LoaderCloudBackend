@@ -128,6 +128,7 @@ class ScenarioIn(BaseModel):
                 "name": "登录接口全链路压测",
                 "scenario_type": "单交易基准",
                 "duration": 600,
+                "environment_id": 1,
                 "param_overrides": {"host": "api.demo.com"},
                 "description": "模拟高峰时段登录请求",
                 "scripts": [
@@ -156,7 +157,11 @@ class ScenarioIn(BaseModel):
     scenario_type: ScenarioType
     # 场景级运行时间（秒）
     duration: int = 0
-    # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数
+    # 绑定的被测环境（可选）：执行期把 environment.variables 注入 -J 参数
+    # 作为 param_overrides 的基础层；不传或传 null 表示不绑定环境
+    environment_id: int | None = None
+    # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数；
+    # 优先级高于 environment.variables
     param_overrides: dict = {}
     description: str = ""
     scripts: list[ScenarioScriptIn] = []
@@ -171,6 +176,7 @@ class ScenarioUpdateIn(BaseModel):
                 "name": "登录接口全链路压测",
                 "scenario_type": "单交易基准",
                 "duration": 600,
+                "environment_id": 1,
                 "param_overrides": {"host": "api.demo.com"},
                 "description": "模拟高峰时段登录请求",
                 "scripts": [
@@ -198,6 +204,8 @@ class ScenarioUpdateIn(BaseModel):
     name: str
     scenario_type: ScenarioType
     duration: int = 0
+    # 绑定的被测环境：传 null 表示解绑，传 int 表示绑定到新环境
+    environment_id: int | None = None
     param_overrides: dict = {}
     description: str = ""
     # 全量替换：传空数组表示清空场景下所有脚本关联
@@ -238,6 +246,8 @@ class ScenarioOut(BaseModel):
     name: str
     scenario_type: ScenarioType
     duration: int
+    # 绑定的被测环境（nullable：未绑定为 null）
+    environment_id: int | None
     param_overrides: dict | None
     description: str
     scripts: list[ScenarioScriptOut] = []

@@ -94,14 +94,22 @@
 - **验收**：master 全量 292 测试通过、ruff 全过
 - **工作量**：3-4 天
 
-### A3 Scenario 绑定 Environment
+### A3 Scenario 绑定 Environment ✅ 已完成（2026-09-16）
 - **修改文件**：
   - `master/app/models/scenario.py`（加 `environment_id` 外键，nullable 兼容存量）
-  - `master/app/schemas/`（scenario 相关 schema 加 `environment_id`）
-  - `master/app/services/orchestrator.py`（执行期把 environment 的 hosts/variables 注入 JMX `-J` 参数）
-- **迁移**：新增列即可，向后兼容
-- **验收**：场景绑定环境后执行，JMeter 日志能看到 `-Jbase_url=...` 等参数注入
-- **工作量**：1-2 天
+  - `master/app/schemas/__init__.py`（ScenarioIn/UpdateIn/Out 加 `environment_id`）
+  - `master/app/api/v1/scenarios.py`（create/update 校验环境归属 3041/3042 + 持久化 + 响应含 environment_id）
+  - `master/app/api/v1/environments.py`（删除预检激活场景引用统计 + 严格 3043 + force 解绑引用场景）
+  - `master/app/services/orchestrator.py`（执行期 `_build_jmeter_args` 合并 environment.variables 与 scenario.param_overrides）
+- **新增文件**：
+  - `master/alembic/versions/20260916c1_scenario_environment.py`
+  - `master/tests/test_scenario_environment.py`（19 用例）
+- **关键约束**：
+  - `environment_id` 弱关联 FK→test_environment.id，ondelete=SET NULL（nullable 兼容存量）
+  - 场景 create/update 校验环境归属：不存在 3041 / 跨项目 3042（与 environments.py 两码对齐）
+  - 环境删除预检返回 scenario 引用数；严格模式 >0 抛 3043，force 模式批量 UPDATE scenario.environment_id=NULL 解绑再删
+  - orchestrator -J 参数优先级：scenario.param_overrides > environment.variables；未绑定环境退化为纯场景级覆盖（向后兼容）
+- **验收**：master 全量 311 测试通过、ruff 全过
 
 ### A4 测试方案（TestPlan）模块（弱关联 Scenario）
 - **新增文件**：`master/app/models/test_plan.py`、`test_plan_scenario.py`、对应 schema/api/migration/tests
