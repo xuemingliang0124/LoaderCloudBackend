@@ -72,18 +72,26 @@
 - **验收**：master 全量 262 测试通过、ruff 全过
 - **工作量**：3-4 天
 
-### A2 交易清单（Transaction）模块
+### A2 交易清单（Transaction）模块 ✅ 已完成（2026-09-16）
 - **新增文件**：
-  - `master/app/models/transaction.py`
-  - `master/app/schemas/transaction.py`
-  - `master/app/api/v1/transactions.py`
-  - `master/alembic/versions/xxx_add_transactions.py`
-  - `master/tests/test_transactions.py`
-- **域模型字段**：`id, project_id, name, txn_code, default_script_id(FK), sla_tps, sla_p95_ms, sla_error_rate, description`
-- **关联点**：
-  - 与 `scripts` 表弱关联（一个交易可对应多版本 JMX）
-  - 反向优化 `master/app/services/jmx_scanner.py`：扫描出的 sampler 可作为交易候选清单
-- **验收**：CRUD + 批量导入（从扫描结果）+ 测试通过
+  - `master/app/models/transaction.py`（ORM）
+  - `master/app/api/v1/transactions.py`（路由）
+  - `master/alembic/versions/20260916b1_transaction.py`
+  - `master/tests/test_transactions.py`（30 用例）
+- **修改文件**：
+  - `master/app/models/__init__.py`（导出 Transaction）
+  - `master/app/schemas/__init__.py`（TransactionIn/UpdateIn/Out 集中定义）
+  - `master/app/api/v1/__init__.py`（注册路由）
+  - `master/app/api/v1/projects.py`（删除预检加 transactions 计数；3023 严格阻断含交易；force 级联补交易清理，解除 RESTRICT FK）
+  - `master/tests/test_projects.py`（force 响应断言补 removed_transactions；级联清理校验加 test_transaction 表）
+- **域模型字段**：`id, project_id, name, txn_code, default_script_id(弱关联 FK ondelete=SET NULL), sla_tps(Float), sla_p95_ms(Int), sla_error_rate(Float), description`
+- **关键约束**：
+  - 项目内 `(project_id, txn_code)` 唯一（重复 3050；不存在 3051；跨项目 3052；A3/A4 引用阻断 3053；默认脚本不存在/跨项目 3054）
+  - 删除预检 + force 模式（A3/A4 场景/方案引用统计当前恒 0，契约前向兼容）
+  - viewer+ 可查、editor+ 增改、owner+ 可删
+  - 表名 `test_transaction`；project_id FK RESTRICT（项目 force 删除在应用层 bulk delete 交易）；default_script_id 弱关联 ondelete=SET NULL（脚本删除由 DB 自动置空，不阻断）
+  - SLA 指标用 Float 而非 Numeric：监控阈值非货币，跨 SQLite(REAL)/MySQL(FLOAT) 行为一致
+- **验收**：master 全量 292 测试通过、ruff 全过
 - **工作量**：3-4 天
 
 ### A3 Scenario 绑定 Environment

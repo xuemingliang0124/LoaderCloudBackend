@@ -429,6 +429,95 @@ class EnvironmentOut(BaseModel):
     updated_at: datetime
 
 
+class TransactionIn(BaseModel):
+    """新建被测交易请求：项目内 txn_code 唯一。"""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "登录交易",
+                "txn_code": "login",
+                "default_script_id": 1,
+                "sla_tps": 100.0,
+                "sla_p95_ms": 500,
+                "sla_error_rate": 1.0,
+                "description": "登录接口压测交易",
+            }
+        }
+    )
+
+    name: str = Field(..., min_length=1, max_length=128, examples=["登录交易"])
+    txn_code: str = Field(..., min_length=1, max_length=64, examples=["login"])
+    # 默认执行脚本：弱关联，仅标记默认版本，不阻断脚本删除；可空
+    default_script_id: int | None = Field(default=None, examples=[1])
+    sla_tps: float | None = Field(default=None, ge=0, examples=[100.0])
+    sla_p95_ms: int | None = Field(default=None, ge=0, examples=[500])
+    sla_error_rate: float | None = Field(default=None, ge=0, le=100, examples=[1.0])
+    description: str = Field(default="", max_length=512)
+
+    @field_validator("name", "txn_code")
+    @classmethod
+    def _strip_and_require(cls, v: str) -> str:
+        # 与环境编码口径一致：去除首尾空白，纯空白视为非法（422）
+        v = v.strip()
+        if not v:
+            raise ValueError("名称与交易编码不能为空")
+        return v
+
+
+class TransactionUpdateIn(BaseModel):
+    """更新被测交易请求：所有字段可选，至少传一项。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    txn_code: str | None = Field(default=None, min_length=1, max_length=64)
+    default_script_id: int | None = Field(default=None)
+    sla_tps: float | None = Field(default=None, ge=0)
+    sla_p95_ms: int | None = Field(default=None, ge=0)
+    sla_error_rate: float | None = Field(default=None, ge=0, le=100)
+    description: str | None = Field(default=None, max_length=512)
+
+    @field_validator("name", "txn_code")
+    @classmethod
+    def _strip_and_require(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("名称与交易编码不能为空")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "TransactionUpdateIn":
+        fields = (
+            self.name,
+            self.txn_code,
+            self.default_script_id,
+            self.sla_tps,
+            self.sla_p95_ms,
+            self.sla_error_rate,
+            self.description,
+        )
+        if all(f is None for f in fields):
+            raise ValueError("至少提供一个更新字段")
+        return self
+
+
+class TransactionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    name: str
+    txn_code: str
+    default_script_id: int | None
+    sla_tps: float | None
+    sla_p95_ms: int | None
+    sla_error_rate: float | None
+    description: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class MemberGrantIn(BaseModel):
     """项目成员授权请求。"""
 

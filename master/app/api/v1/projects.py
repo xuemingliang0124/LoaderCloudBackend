@@ -21,6 +21,7 @@ from app.models.run_agent_result import RunAgentResult
 from app.models.scenario import Scenario
 from app.models.schedule import ScheduleJob
 from app.models.script import Script
+from app.models.transaction import Transaction
 from app.schemas import ProjectIn, ProjectOut, ProjectUpdateIn
 from app.schemas.common import like_pattern, ok
 from app.services import scheduler as scheduler_service
@@ -172,7 +173,7 @@ async def precheck_project_delete(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """删除前预检：返回项目内脚本数、环境数、场景数、运行中任务数、引用的定时任务列表。
+    """删除前预检：返回项目内脚本数、环境数、交易数、场景数、运行中任务数、引用的定时任务列表。
 
     前端据此决定是否弹出确认框并发起 force=true 的强制删除；
     running_runs > 0 时无论是否 force 都不可删除（需先停止执行）。
@@ -196,6 +197,13 @@ async def precheck_project_delete(
             select(func.count())
             .select_from(Environment)
             .where(Environment.project_id == project_id)
+        )
+    ) or 0
+    transactions = (
+        await db.scalar(
+            select(func.count())
+            .select_from(Transaction)
+            .where(Transaction.project_id == project_id)
         )
     ) or 0
     running_runs = 0
@@ -223,6 +231,7 @@ async def precheck_project_delete(
             "project_id": project_id,
             "scripts": int(scripts),
             "environments": int(environments),
+            "transactions": int(transactions),
             "scenarios": len(scenario_ids),
             "running_runs": int(running_runs),
             "schedule_jobs": [{"id": r.id, "name": r.name} for r in schedule_jobs],
@@ -242,10 +251,10 @@ async def delete_project(
 ) -> dict:
     """删除项目（owner+）：遵循「预检 + force 级联」模式。
 
-    默认严格模式：项目内存在脚本、环境或场景时拒绝（3023），需先清理资产或 force。
+    默认严格模式：项目内存在脚本、环境、交易或场景时拒绝（3023），需先清理资产或 force。
     force=true 强制级联：按 run_agent_result → scenario_run → 定时任务（含
     APScheduler 注销）→ 场景（级联 scenario_script/scenario_script_tg）→ 脚本 →
-    环境 → 项目（含成员关系）顺序清理；运行中任务仍拒绝（3014，需先停止执行）。
+    环境 → 交易 → 项目（含成员关系）顺序清理；运行中任务仍拒绝（3014，需先停止执行）。
     MinIO 产物（scripts/{id}/、runs/{run_no}/）在提交后 best-effort 清理，失败仅告警。
     """
     await ensure_project_access(db, project_id, user, "owner")
@@ -267,6 +276,13 @@ async def delete_project(
             .where(Environment.project_id == project_id)
         )
     ) or 0
+    txn_count = (
+        await db.scalar(
+            select(func.count())
+            .select_from(Transaction)
+            .where(Transaction.project_id == project_id)
+        )
+    ) or 0
 
     # 未结束的执行任务：force 也不例外，必须先停止（与场景删除口径一致 3014）
     if scenario_ids:
@@ -286,10 +302,10 @@ async def delete_project(
                 code=3014,
             )
 
-    if not force and (script_rows or scenario_ids or env_count):
+    if not force and (script_rows or scenario_ids or env_count or txn_count):
         raise BusinessError(
             f"项目下存在 {len(script_rows)} 个脚本、{env_count} 个环境、"
-            f"{len(scenario_ids)} 个场景，无法删除；"
+            f"{txn_count} 个交易、{len(scenario_ids)} 个场景，无法删除；"
             "请先通过删除预检接口确认后携带 force=true 强制删除",
             code=3023,
         )
@@ -355,6 +371,11 @@ async def delete_project(
         await db.execute(
             delete(Environment).where(Environment.project_id == project_id)
         )
+        # 交易行：default_script_id 弱关联已随脚本删除由 DB ondelete 置空，
+        # 此处 bulk delete 解除 test_project RESTRICT 外键
+        await db.execute(
+            delete(Transaction).where(Transaction.project_id == project_id)
+        )
 
     # 项目 + 成员关系（成员 FK 虽为 CASCADE，显式删除保证各库行为一致）
     await db.execute(
@@ -380,6 +401,7 @@ async def delete_project(
             "force": force,
             "removed_scripts": len(script_rows) if force else 0,
             "removed_environments": int(env_count) if force else 0,
+            "removed_transactions": int(txn_count) if force else 0,
             "removed_scenarios": len(scenario_ids) if force else 0,
             "removed_runs": len(run_nos),
             "removed_schedules": len(schedule_rows) if force else 0,
