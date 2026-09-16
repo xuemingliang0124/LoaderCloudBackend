@@ -2,7 +2,11 @@
 
 脚本关联（含各自的压力机选择策略）与线程组设置分别落在
 scenario_script / scenario_script_tg 表，本表只存场景级配置
-（名称、全局 JVM 参数覆盖）。
+（名称、全局 JVM 参数覆盖、绑定的被测环境）。
+
+A3 起场景可绑定一个被测环境（environment_id 弱关联）：执行期由编排层
+把 environment.variables 注入 JMX -J 参数，作为场景 param_overrides 的基础层
+（环境变量为基础，场景级 param_overrides 覆盖优先级更高）。
 """
 
 from __future__ import annotations
@@ -46,7 +50,17 @@ class Scenario(Base, IntPkMixin, TimestampMixin):
     # 场景级运行时间（秒）：非单交易基准场景统一覆盖各线程组的 duration；
     # 单交易基准执行期走固定参数（循环 100、关闭调度器），本字段不生效
     duration: Mapped[int] = mapped_column(Integer, default=0)
-    # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数
+    # 绑定的被测环境（弱关联）：nullable 兼容存量未绑定环境的场景；
+    # ondelete=SET NULL：环境删除由删除预检阻断（严格 3043），
+    # force 模式下应用层解绑引用再删环境，DB 层 SET NULL 作为兜底
+    environment_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("test_environment.id", name="fk_test_scenario_environment"),
+        nullable=True,
+        index=True,
+    )
+    # 场景级 JVM 参数覆盖 {"host": "api.demo.com"}，执行时拼 -J 参数；
+    # 优先级高于 environment.variables（环境变量为基础层）
     param_overrides: Mapped[dict | None] = mapped_column(JSON, default=dict)
     description: Mapped[str] = mapped_column(String(512), default="")
 

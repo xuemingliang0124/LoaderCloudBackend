@@ -19,6 +19,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
+from app.models.environment import Environment
 from app.models.enums import RunStatus, RunTrigger, ScenarioType
 from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
@@ -39,6 +40,22 @@ _watchdogs: dict[str, asyncio.Task] = {}
 
 # 单交易基准场景固定线程数（优先级高于场景保存的线程组设置）
 _BASELINE_NUM_THREADS = 5
+
+
+def _build_jmeter_args(
+    scenario: Scenario, environment: Environment | None
+) -> dict[str, str]:
+    """构造场景级 -J 参数：环境 variables 为基础层，场景 param_overrides 覆盖优先。
+
+    优先级：scenario.param_overrides > environment.variables；
+    环境不绑定或 variables 为空时退化为纯场景级覆盖（向后兼容）。
+    所有键值统一转 str，供 JMeter -Jkey=value 拼装。
+    """
+    args: dict[str, str] = {}
+    if environment is not None and environment.variables:
+        args.update({str(k): str(v) for k, v in environment.variables.items()})
+    args.update({str(k): str(v) for k, v in (scenario.param_overrides or {}).items()})
+    return args
 
 
 def _effective_thread_group_settings(
@@ -165,10 +182,12 @@ async def create_run(
         )
         await db.commit()
 
-        # 场景级 JVM 参数覆盖（对所有脚本生效）
-        base_args: dict[str, str] = {
-            str(k): str(v) for k, v in (scenario.param_overrides or {}).items()
-        }
+        # 场景级 JVM 参数覆盖（对所有脚本生效）：环境 variables 为基础层，
+        # 场景 param_overrides 优先级更高；未绑定环境时退化为纯场景级覆盖
+        environment: Environment | None = None
+        if scenario.environment_id is not None:
+            environment = await db.get(Environment, scenario.environment_id)
+        base_args: dict[str, str] = _build_jmeter_args(scenario, environment)
 
         # 各 Agent 产物上传目标（预签 PUT URL 按 agent 独立签发）
         upload_urls = {

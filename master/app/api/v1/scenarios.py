@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps import CurrentUser, ensure_project_access, get_current_user
 from app.db.session import get_db
+from app.models.environment import Environment
 from app.models.enums import RunStatus
 from app.models.run import ScenarioRun
 from app.models.run_agent_result import RunAgentResult
@@ -82,6 +83,26 @@ async def _validate_project_scripts(
         raise BusinessError(f"脚本不属于指定项目: {foreign}", code=3022)
 
 
+async def _validate_environment_belongs_to_project(
+    db: AsyncSession, project_id: int, environment_id: int | None
+) -> None:
+    """校验绑定环境：传值时必须存在（3041）且属于同一项目（3042）。
+
+    None 表示不绑定环境（兼容存量场景），直接放行。
+    """
+    if environment_id is None:
+        return
+    env = (
+        await db.execute(select(Environment).where(Environment.id == environment_id))
+    ).scalar_one_or_none()
+    if env is None:
+        raise BusinessError(f"环境不存在: {environment_id}", code=3041)
+    if env.project_id != project_id:
+        raise BusinessError(
+            f"环境不属于指定项目: environment_id={environment_id}", code=3042
+        )
+
+
 def _build_scenario_out(scenario: Scenario) -> dict:
     """把 Scenario ORM（含 scripts/thread_groups/script 关联）转为响应 dict。"""
     scripts_out: list[dict] = []
@@ -108,6 +129,7 @@ def _build_scenario_out(scenario: Scenario) -> dict:
         name=scenario.name,
         scenario_type=scenario.scenario_type,
         duration=scenario.duration,
+        environment_id=scenario.environment_id,
         param_overrides=scenario.param_overrides,
         description=scenario.description,
         scripts=scripts_out,
@@ -147,11 +169,17 @@ async def create_scenario(
     script_ids = [s.script_id for s in payload.scripts]
     await _validate_project_scripts(db, project_id, script_ids)
 
+    # 校验绑定环境（可选）：传值时必须属于同一项目
+    await _validate_environment_belongs_to_project(
+        db, project_id, payload.environment_id
+    )
+
     scenario = Scenario(
         project_id=project_id,
         name=payload.name,
         scenario_type=payload.scenario_type,
         duration=payload.duration,
+        environment_id=payload.environment_id,
         param_overrides=payload.param_overrides,
         description=payload.description,
     )
@@ -291,10 +319,16 @@ async def update_scenario(
     script_ids = [s.script_id for s in payload.scripts]
     await _validate_project_scripts(db, project_id, script_ids)
 
+    # 校验绑定环境（可选）：传值时必须属于同一项目；传 null 表示解绑
+    await _validate_environment_belongs_to_project(
+        db, project_id, payload.environment_id
+    )
+
     # ---- 更新场景基础信息 ----
     scenario.name = payload.name
     scenario.scenario_type = payload.scenario_type
     scenario.duration = payload.duration
+    scenario.environment_id = payload.environment_id
     scenario.param_overrides = payload.param_overrides
     scenario.description = payload.description
 
