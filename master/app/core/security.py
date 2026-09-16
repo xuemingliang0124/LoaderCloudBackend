@@ -3,7 +3,8 @@
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
-from jose import JWTError, jwt
+from jose import ExpiredSignatureError, JWTError, jwt
+from loguru import logger
 
 from app.core.config import get_settings
 
@@ -25,17 +26,31 @@ def create_access_token(subject: str, role: str) -> str:
     settings = get_settings()
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expire_minutes)
     payload = {"sub": subject, "role": role, "exp": expire}
-    return jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
+    token = jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
+    logger.debug(
+        f"签发 JWT: sub={subject}, role={role}, "
+        f"exp={expire.isoformat()}, expire_minutes={settings.jwt_expire_minutes}"
+    )
+    return token
 
 
 def decode_token_payload(token: str) -> dict | None:
     """解码完整 payload；非法/过期返回 None。"""
     try:
         settings = get_settings()
-        return jwt.decode(
+        payload = jwt.decode(
             token, settings.secret_key, algorithms=[settings.jwt_algorithm]
         )
-    except JWTError:
+        logger.debug(
+            f"JWT 解码成功: sub={payload.get('sub')}, role={payload.get('role')}, "
+            f"exp={payload.get('exp')}"
+        )
+        return payload
+    except ExpiredSignatureError:
+        logger.warning("JWT 验证失败: token 已过期")
+        return None
+    except JWTError as exc:
+        logger.warning(f"JWT 验证失败: {type(exc).__name__}: {exc}")
         return None
 
 

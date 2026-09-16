@@ -145,6 +145,11 @@ async def create_run(
 
         # 预期结果数 = 所有 (脚本, Agent) 下发对
         expected_results = sum(len(aids) for aids in script_agents.values())
+        logger.debug(
+            f"场景 {scenario_id} 选机完成: "
+            f"{len(script_agents)} 脚本, {len(all_agent_ids)} Agent, "
+            f"预期结果 {expected_results} 条"
+        )
 
         run_no = f"r{time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
         db.add(
@@ -281,6 +286,9 @@ async def dispatch(
             "upload": upload_urls.get(aid, {}),
         }
         message = Envelope.now(MSG_TASK, payload).model_dump()
+        logger.debug(
+            f"run={run_no} 下发任务到 {aid}: jmx={payload.get('jmx_key', '?')}"
+        )
         if await agent_manager.send(aid, message):
             sent.append(aid)
 
@@ -579,6 +587,11 @@ async def on_agent_result(
             return
         stopping = run.status == RunStatus.STOPPING
         expected = run.expected_results or len(run.agent_ids or [])
+        logger.debug(
+            f"run={run_no} 收到 {agent_id} 结果: "
+            f"script={scenario_script_id}, failed={failed}, "
+            f"artifacts={len(artifacts)}"
+        )
 
         # 按 (run_no, agent_id, scenario_script_id) 查找已有记录
         stmt = select(RunAgentResult).where(

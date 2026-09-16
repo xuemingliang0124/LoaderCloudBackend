@@ -1,5 +1,6 @@
 """用户服务。"""
 
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +35,11 @@ async def get_by_username(db: AsyncSession, username: str) -> User | None:
 
 async def authenticate(db: AsyncSession, username: str, password: str) -> User:
     user = await get_by_username(db, username)
-    if user is None or not verify_password(password, user.password_hash):
+    if user is None:
+        logger.debug(f"登录失败: 用户不存在 username={username}")
         raise BusinessError("用户名或密码错误", code=1001)
+    if not verify_password(password, user.password_hash):
+        logger.debug(f"登录失败: 密码不匹配 username={username}")
+        raise BusinessError("用户名或密码错误", code=1001)
+    logger.debug(f"登录成功: username={username}, role={user.role}")
     return user
