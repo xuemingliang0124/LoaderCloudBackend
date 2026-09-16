@@ -9,8 +9,11 @@ Agent 端收到消息后异步下载/卸载，完成后回 MSG_PLUGIN_ACK，
 本模块 on_plugin_ack 维护 agent_plugin 表。
 """
 
+import hashlib
+import json
+
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.db.session import SessionLocal
 from app.models.agent_plugin import AgentPlugin
@@ -275,23 +278,28 @@ async def recover_legacy_script_plugins() -> int:
     一次性迁移工具，应用启动时调用；已迁移过的（sha256 命中）跳过。
     返回新建的插件记录数。
     """
-    from app.models.script import Script
-
     created = 0
     async with SessionLocal() as db:
-        scripts = (
+        # Script ORM 已下线 plugins 属性（模型见 script.py 注释），但 DB 列保留；
+        # 用裸 SQL 读历史数据，绕过 ORM 映射
+        rows = (
             (
                 await db.execute(
-                    select(Script).where(Script.plugins.isnot(None))  # type: ignore[attr-defined]
+                    text(
+                        "SELECT id, plugins FROM jmeter_script WHERE plugins IS NOT NULL"
+                    )
                 )
             )
-            .scalars()
+            .mappings()
             .all()
         )
         # 收集所有脚本插件项 [{key, filename}] 去重 by filename
         seen_filenames: dict[str, str] = {}  # filename -> minio_key
-        for s in scripts:
-            for item in s.plugins or []:
+        for row in rows:
+            raw = row["plugins"]
+            # 裸 SQL 下 MySQL JSON 列由驱动返回字符串；sqlite 测试库为已解析 JSON
+            items = json.loads(raw) if isinstance(raw, (str, bytes)) else (raw or [])
+            for item in items or []:
                 fn = item.get("filename") or ""
                 key = item.get("key") or ""
                 if fn and key and fn not in seen_filenames:
@@ -317,7 +325,6 @@ async def recover_legacy_script_plugins() -> int:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"迁移脚本插件 {fn}（key={key}）失败: {exc}")
                 continue
-            import hashlib
 
             sha = hashlib.sha256(obj_data).hexdigest()
             # sha256 去重：命中已有插件则跳过（不重复建记录）

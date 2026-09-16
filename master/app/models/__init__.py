@@ -3,6 +3,7 @@
 from app.models.agent_node import AgentNode
 from app.models.agent_plugin import AgentPlugin
 from app.models.base import Base, IntPkMixin, TimestampMixin
+from app.models.environment import Environment
 from app.models.enums import (
     AgentPhase,
     AgentStatus,
@@ -31,6 +32,7 @@ __all__ = [
     "AgentStatus",
     "Base",
     "IntPkMixin",
+    "Environment",
     "GlobalRole",
     "JmeterPlugin",
     "Project",
