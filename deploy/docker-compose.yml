@@ -62,25 +62,15 @@ services:
 
   master:
     build: ../master
+    # 容器配置统一来自 deploy/.env（env_file 注入容器；该文件同时是 compose 插值源）
+    env_file:
+      - .env
     environment:
       TZ: Asia/Shanghai
-      DEBUG: "true"
-      SECRET_KEY: change-me-in-production
-      MYSQL_HOST: mysql
-      MYSQL_PORT: "3306"
-      MYSQL_USER: ptp
-      MYSQL_PASSWORD: ptp123456
-      MYSQL_DB: ptp
-      ES_URL: http://elasticsearch:9200
-      MINIO_ENDPOINT: minio:9000
       # presigned URL 对外地址：Agent 侧必须能解析该主机名。
       # 默认 host.docker.internal:9000 适用于同机 Docker Desktop/Linux(需 agent 侧 host-gateway)；
       # 跨机部署必须改为 MinIO 宿主机真实 IP:9000
       MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-host.docker.internal:9000}
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
-      MINIO_BUCKET: ptp
-      SCHEDULER_ENABLED: "true"
     ports:
       - "8000:8000"
     depends_on:

@@ -483,6 +483,7 @@ async def test_force_cascade_deletes_all_assets(client, db_session) -> None:
         "deleted": True,
         "force": True,
         "removed_scripts": 1,
+        "removed_environments": 0,
         "removed_scenarios": 1,
         "removed_runs": 1,
         "removed_schedules": 1,

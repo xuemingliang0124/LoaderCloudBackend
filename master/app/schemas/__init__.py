@@ -324,6 +324,111 @@ class ProjectUpdateIn(BaseModel):
         return self
 
 
+class EnvironmentIn(BaseModel):
+    """新建被测环境请求：项目内 env_code 唯一。"""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "生产环境",
+                "env_code": "prod",
+                "base_url": "https://api.demo.com",
+                "hosts": [
+                    {"name": "app-01", "host": "10.0.0.1", "port": 8080, "role": "应用"}
+                ],
+                "db_connections": [
+                    {
+                        "name": "订单库",
+                        "type": "mysql",
+                        "dsn": "mysql://10.0.0.3:3306/orders",
+                    }
+                ],
+                "middleware_info": [
+                    {"type": "redis", "address": "10.0.0.2:6379", "remark": "缓存"}
+                ],
+                "variables": {"base_url": "https://api.demo.com"},
+                "description": "生产集群，变更需审批",
+            }
+        }
+    )
+
+    name: str = Field(..., min_length=1, max_length=128, examples=["生产环境"])
+    env_code: str = Field(..., min_length=1, max_length=64, examples=["prod"])
+    base_url: str = Field(default="", max_length=512, examples=["https://api.demo.com"])
+    # 主机/数据库/中间件均为清单结构，元素为自由 JSON 对象（结构后续随资产管道固化）
+    hosts: list[dict] = Field(default_factory=list)
+    db_connections: list[dict] = Field(default_factory=list)
+    middleware_info: list[dict] = Field(default_factory=list)
+    # 执行期注入 JMX 的 -J 键值覆盖
+    variables: dict = Field(default_factory=dict)
+    description: str = Field(default="", max_length=512)
+
+    @field_validator("name", "env_code")
+    @classmethod
+    def _strip_and_require(cls, v: str) -> str:
+        # 与项目名称口径一致：去除首尾空白，纯空白视为非法（422）
+        v = v.strip()
+        if not v:
+            raise ValueError("名称与环境编码不能为空")
+        return v
+
+
+class EnvironmentUpdateIn(BaseModel):
+    """更新被测环境请求：所有字段可选，至少传一项。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    env_code: str | None = Field(default=None, min_length=1, max_length=64)
+    base_url: str | None = Field(default=None, max_length=512)
+    hosts: list[dict] | None = None
+    db_connections: list[dict] | None = None
+    middleware_info: list[dict] | None = None
+    variables: dict | None = None
+    description: str | None = Field(default=None, max_length=512)
+
+    @field_validator("name", "env_code")
+    @classmethod
+    def _strip_and_require(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("名称与环境编码不能为空")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "EnvironmentUpdateIn":
+        fields = (
+            self.name,
+            self.env_code,
+            self.base_url,
+            self.hosts,
+            self.db_connections,
+            self.middleware_info,
+            self.variables,
+            self.description,
+        )
+        if all(f is None for f in fields):
+            raise ValueError("至少提供一个更新字段")
+        return self
+
+
+class EnvironmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    name: str
+    env_code: str
+    base_url: str
+    hosts: list | None
+    db_connections: list | None
+    middleware_info: list | None
+    variables: dict | None
+    description: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class MemberGrantIn(BaseModel):
     """项目成员授权请求。"""
 

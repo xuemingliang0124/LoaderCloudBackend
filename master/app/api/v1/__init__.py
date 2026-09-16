@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     agents,
     auth,
+    environments,
     health,
     members,
     metrics,
@@ -24,6 +25,7 @@ api_router.include_router(agents.router, tags=["agents"])
 api_router.include_router(plugins.router, tags=["plugins"])
 api_router.include_router(scripts.router, tags=["scripts"])
 api_router.include_router(projects.router, tags=["projects"])
+api_router.include_router(environments.router, tags=["environments"])
 api_router.include_router(members.router, tags=["project-members"])
 api_router.include_router(users.router, tags=["users"])
 api_router.include_router(scenarios.router, tags=["scenarios"])
