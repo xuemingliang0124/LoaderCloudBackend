@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,11 +36,25 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> CurrentUser:
     if credentials is None:
+        logger.debug("鉴权失败: 请求未携带 Authorization 头")
         raise HTTPException(status_code=401, detail="未登录")
+    # token 前缀掩码，只看前 20 字符用于排查（不泄露完整 token）
+    token_preview = credentials.credentials[:20]
     payload = decode_token_payload(credentials.credentials)
     # 缺 sub/role 的 token（含改造前旧 token）一律视为无效，强制重新登录
-    if payload is None or not payload.get("sub") or not payload.get("role"):
+    if payload is None:
+        logger.debug(f"鉴权失败: token 解码失败 (prefix={token_preview}...)")
         raise HTTPException(status_code=401, detail="登录已过期")
+    if not payload.get("sub") or not payload.get("role"):
+        logger.debug(
+            f"鉴权失败: token 缺少 sub/role claim "
+            f"(sub={payload.get('sub')}, role={payload.get('role')}, "
+            f"prefix={token_preview}...)"
+        )
+        raise HTTPException(status_code=401, detail="登录已过期")
+    logger.debug(
+        f"鉴权通过: sub={payload['sub']}, role={payload['role']} (prefix={token_preview}...)"
+    )
     return CurrentUser(username=payload["sub"], role=payload["role"])
 
 

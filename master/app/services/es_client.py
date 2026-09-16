@@ -93,9 +93,7 @@ async def ensure_indices() -> None:
                 f"段类型冲突，查询降级 match_phrase 不影响功能）：{exc}"
             )
     else:
-        await es.indices.create(
-            index=settings.summary_index, body=_SUMMARY_MAPPING
-        )
+        await es.indices.create(index=settings.summary_index, body=_SUMMARY_MAPPING)
         logger.info(f"已创建汇总索引 {settings.summary_index}")
 
 
@@ -109,6 +107,10 @@ async def write_metrics(doc: dict) -> None:
     start = time.perf_counter()
     ok = True
     try:
+        logger.debug(
+            f"write_metrics: run={doc.get('run_no', '?')} "
+            f"agent={doc.get('agent_id', '?')} labels={len(doc.get('by_label', []) or [])}"
+        )
         ts = int(doc.get("ts") or datetime.now(tz=timezone.utc).timestamp())
         body = {k: v for k, v in doc.items() if k != "ts"}
         body["@timestamp"] = ts * 1000
@@ -152,6 +154,7 @@ async def write_summary(run_no: str, summary: dict) -> None:
     start = time.perf_counter()
     ok = True
     try:
+        logger.debug(f"write_summary: run={run_no} keys={list(summary.keys())}")
         await get_es().index(
             index=get_settings().summary_index,
             document={"run_no": run_no, **summary},
@@ -284,9 +287,7 @@ async def query_realtime_summary(run_no: str) -> dict:
     resp = await get_es().search(
         body=body, index=f"{get_settings().es_index_prefix}-metrics-*"
     )
-    non_total = (
-        (resp.get("aggregations", {}) or {}).get("non_total", {}) or {}
-    )
+    non_total = (resp.get("aggregations", {}) or {}).get("non_total", {}) or {}
     samples = int(non_total.get("samples", {}).get("value") or 0)
     success = int(non_total.get("success", {}).get("value") or 0)
     errors = int(non_total.get("errors", {}).get("value") or 0)
@@ -294,9 +295,7 @@ async def query_realtime_summary(run_no: str) -> dict:
     max_rt = float(non_total.get("max_rt", {}).get("value") or 0.0)
     rt_weighted = float(non_total.get("rt_weighted", {}).get("value") or 0.0)
     avg_rt = rt_weighted / samples if samples > 0 else 0.0
-    p95_values = (
-        (non_total.get("p95_rt", {}) or {}).get("values", {}) or {}
-    )
+    p95_values = (non_total.get("p95_rt", {}) or {}).get("values", {}) or {}
     p95_rt = float(p95_values.get("95.0") or 0.0)
     first_ts = non_total.get("first_ts", {}).get("value")
     last_ts = non_total.get("last_ts", {}).get("value")
@@ -305,18 +304,16 @@ async def query_realtime_summary(run_no: str) -> dict:
     by_label: list[dict] = []
     for label_bucket in (non_total.get("by_label", {}) or {}).get("buckets", []):
         label = label_bucket.get("key")
-        for type_bucket in (label_bucket.get("by_type", {}) or {}).get(
-            "buckets", []
-        ):
+        for type_bucket in (label_bucket.get("by_type", {}) or {}).get("buckets", []):
             lbl_samples = int(type_bucket.get("samples", {}).get("value") or 0)
             lbl_errors = int(type_bucket.get("errors", {}).get("value") or 0)
             lbl_success = int(type_bucket.get("success", {}).get("value") or 0)
             lbl_rt_weighted = float(
                 type_bucket.get("rt_weighted", {}).get("value") or 0.0
             )
-            lbl_p95_values = (
-                (type_bucket.get("p95_rt", {}) or {}).get("values", {}) or {}
-            )
+            lbl_p95_values = (type_bucket.get("p95_rt", {}) or {}).get(
+                "values", {}
+            ) or {}
             lbl_first_ts = type_bucket.get("first_ts", {}).get("value")
             lbl_last_ts = type_bucket.get("last_ts", {}).get("value")
             by_label.append(
@@ -326,15 +323,9 @@ async def query_realtime_summary(run_no: str) -> dict:
                     "samples": lbl_samples,
                     "success": lbl_success,
                     "errors": lbl_errors,
-                    "min_rt": float(
-                        type_bucket.get("min_rt", {}).get("value") or 0.0
-                    ),
-                    "max_rt": float(
-                        type_bucket.get("max_rt", {}).get("value") or 0.0
-                    ),
-                    "avg_rt": lbl_rt_weighted / lbl_samples
-                    if lbl_samples > 0
-                    else 0.0,
+                    "min_rt": float(type_bucket.get("min_rt", {}).get("value") or 0.0),
+                    "max_rt": float(type_bucket.get("max_rt", {}).get("value") or 0.0),
+                    "avg_rt": lbl_rt_weighted / lbl_samples if lbl_samples > 0 else 0.0,
                     "p95_rt": float(lbl_p95_values.get("95.0") or 0.0),
                     "avg_tps": _avg_tps_from_window(
                         lbl_samples, lbl_first_ts, lbl_last_ts
@@ -355,7 +346,9 @@ async def query_realtime_summary(run_no: str) -> dict:
     }
 
 
-def _avg_tps_from_window(samples: int, first_ts: float | None, last_ts: float | None) -> float:
+def _avg_tps_from_window(
+    samples: int, first_ts: float | None, last_ts: float | None
+) -> float:
     """窗口口径 TPS：samples*1000/(last_ts-first_ts)，时间单位 ms。
 
     与 Agent 终态 jtl_parser._avg_tps 一致：用首末样本时间戳作为窗口边界。
