@@ -1,0 +1,121 @@
+// Jenkins Pipeline：同步监控栈 compose + Prometheus 配置 → SSH 远程拉取镜像并以 overlay 方式启动
+//
+// 与主流水线（Jenkinsfile）的区别：
+//   监控栈 6 个服务（prometheus/grafana/node-exporter/cadvisor/mysqld-exporter/
+//   elasticsearch-exporter）全部直接使用 DaoCloud 加速的第三方官方镜像，无自定义
+//   Dockerfile，因此没有 Build & Push ACR 阶段；compose 中也无变量插值，不需要 .env。
+//   监控服务依赖主栈的 mysql/elasticsearch/master 服务网络别名，必须用
+//   -f docker-compose.yml -f docker-compose.monitoring.yml 叠加方式启动（同属 ptp 项目网络）。
+//
+// 前置条件（Jenkins 凭据配置）：
+//   1) SSH_KEY       — Secret file，目标部署服务器的 SSH 私钥（对应目标机 authorized_keys）
+//   2) DEPLOY_HOST   — Secret text，格式 user@ip（如 deployer@10.0.0.10）
+//
+// 目标服务器要求：
+//   主栈已由主 Jenkinsfile 部署完成（/opt/ptp/docker-compose.yml 与 .env 已存在），
+//   已安装 docker + docker compose plugin，SSH 公钥已加入 authorized_keys，
+//   部署目录 /opt/ptp 已存在且 SSH 用户有写权限，
+//   监控端口 9090/3000/9100/8080/9104/9114 未被占用。
+//
+// Jenkins 任务配置：新建 Pipeline 任务，Pipeline → Definition 选 "Pipeline script from SCM"，
+//   Script Path 填 Jenkinsfile.monitoring（与主流水线共用同一仓库）。
+
+pipeline {
+    agent any
+
+    environment {
+        // 目标部署路径（与主流水线一致）
+        DEPLOY_DIR = '/opt/ptp'
+        // 监控栈服务清单：pull/up 均显式限定，避免 overlay 合并时误重建主栈服务
+        MON_SERVICES = 'prometheus grafana node-exporter cadvisor mysqld-exporter elasticsearch-exporter'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Validate Compose') {
+            steps {
+                // 仅做语法/结构校验，不与基础 compose 合并（本机没有目标机的 .env）
+                sh 'docker compose -f deploy/docker-compose.monitoring.yml config -q'
+            }
+        }
+
+        stage('Deploy Monitoring to Remote Server') {
+            steps {
+                script {
+                    withCredentials([
+                        file(credentialsId: 'SSH_KEY',       variable: 'SSH_KEY_FILE'),
+                        string(credentialsId: 'DEPLOY_HOST', variable: 'DEPLOY_HOST')
+                    ]) {
+                        sh '''
+                            set -e
+
+                            # 0. 规范化 SSH 私钥：Windows 上传的 Secret file 常带 CRLF，
+                            #    OpenSSH 的 libcrypto 无法解析 \r，会报 "error in libcrypto"。
+                            #    复制到临时文件 → 去 \r → 权限 600，避免直接修改凭据原文件。
+                            SSH_KEY_CLEAN=$(mktemp)
+                            sed -i 's/\\r$//' "$SSH_KEY_FILE" 2>/dev/null || true
+                            tr -d '\\r' < "$SSH_KEY_FILE" > "$SSH_KEY_CLEAN"
+                            chmod 600 "$SSH_KEY_CLEAN"
+
+                            # 1. 在目标机准备目录（prometheus.yml 以 bind mount 方式挂载）
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                                "mkdir -p $DEPLOY_DIR/prometheus"
+
+                            # 2. 同步监控 compose 与 Prometheus 抓取配置
+                            scp -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no \\
+                                deploy/docker-compose.monitoring.yml \\
+                                "$DEPLOY_HOST:$DEPLOY_DIR/"
+                            scp -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no \\
+                                deploy/prometheus/prometheus.yml \\
+                                "$DEPLOY_HOST:$DEPLOY_DIR/prometheus/"
+
+                            # 3. SSH 到目标机执行 pull + up
+                            #    必须叠加基础 compose：exporter 通过服务名访问
+                            #    mysql/elasticsearch，prometheus 抓取 master:8000，
+                            #    两个 -f 同属 ptp project，容器共用同一网络。
+                            #    显式列出监控服务，up 不会触碰主栈容器。
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                                "cd $DEPLOY_DIR && \\
+                                 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml pull $MON_SERVICES && \\
+                                 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d $MON_SERVICES"
+
+                            # 4. 校验新 Prometheus 配置并热加载（compose 检测不到 bind mount
+                            #    文件内容变化，已运行的 prometheus 容器不会自动重启；
+                            #    --web.enable-lifecycle 已在 compose command 中开启）。
+                            #    promtool 失败则流水线失败：Prometheus 仍保留内存中上一份
+                            #    正常配置继续运行，reload 不会把坏配置切上线。
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                                "docker exec ptp-prometheus promtool check config /etc/prometheus/prometheus.yml && \\
+                                 curl -fsS -X POST http://127.0.0.1:9090/-/reload"
+
+                            # 5. 打印监控服务运行状态，便于在构建日志中确认
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                                "cd $DEPLOY_DIR && \\
+                                 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml ps $MON_SERVICES"
+
+                            rm -f "$SSH_KEY_CLEAN"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            // 清理校验阶段可能产生的悬空镜像（本流水线不在构建机拉取业务镜像）
+            sh 'docker image prune -f || true'
+        }
+        success {
+            echo "✅ 监控栈部署完成：Prometheus(:9090) / Grafana(:3000) 已上线"
+        }
+        failure {
+            echo "❌ 监控流水线失败，请查看上方日志"
+        }
+    }
+}
