@@ -28,7 +28,8 @@ services:
       - "--collation-server=utf8mb4_unicode_ci"
 
   minio:
-    image: docker.m.daocloud.io/library/minio/minio:latest
+    # minio/minio 在 Docker Hub 被 daocloud 拒（denied），改走其 quay 镜像（MinIO 官方双发）
+    image: quay.m.daocloud.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -42,7 +43,8 @@ services:
       - minio_data:/data
 
   elasticsearch:
-    image: docker.m.daocloud.io/library/docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    # elasticsearch 是 Docker Hub 官方镜像（library 命名空间），与 docker.elastic.co 内容一致
+    image: docker.m.daocloud.io/library/elasticsearch:8.14.3
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -65,7 +67,7 @@ services:
   # 选用 Qdrant 单容器：Rust 实现 + async SDK 原生，契合 ptp-dev 3.1 异步约束。
   # ES 仅保留 pt-summary/pt-metrics 职责，不再扩展 dense_vector。
   qdrant:
-    image: docker.m.daocloud.io/library/qdrant/qdrant:v1.11.5
+    image: docker.m.daocloud.io/qdrant/qdrant:v1.11.5
     environment:
       QDRANT__SERVICE__GRPC_PORT: 6334
     ports:
