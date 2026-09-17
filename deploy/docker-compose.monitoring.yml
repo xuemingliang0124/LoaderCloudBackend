@@ -6,7 +6,7 @@ name: ptp
 
 services:
   prometheus:
-    image: prom/prometheus:v2.55.0
+    image: docker.m.daocloud.io/library/prom/prometheus:v2.55.0
     container_name: ptp-prometheus
     restart: unless-stopped
     volumes:
@@ -20,7 +20,7 @@ services:
       - "9090:9090"
 
   grafana:
-    image: grafana/grafana:11.2.0
+    image: docker.m.daocloud.io/library/grafana/grafana:11.2.0
     container_name: ptp-grafana
     restart: unless-stopped
     environment:
@@ -34,7 +34,7 @@ services:
 
   # 宿主机 CPU/内存/磁盘/网络
   node-exporter:
-    image: prom/node-exporter:v1.8.2
+    image: docker.m.daocloud.io/library/prom/node-exporter:v1.8.2
     container_name: ptp-node-exporter
     restart: unless-stopped
     pid: host
@@ -59,7 +59,7 @@ services:
   #    为 overlayfs，cAdvisor 找不到 layerdb，所有容器报
   #    "failed to identify the read-write layer ID" 而无法监控
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    image: docker.m.daocloud.io/library/gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: ptp-cadvisor
     restart: unless-stopped
     privileged: true
@@ -78,7 +78,7 @@ services:
   # 单节点 MySQL 无需复制状态监控，且 MySQL 8.4 已废弃 SHOW SLAVE STATUS
   # 语法（v0.15.1 仍用旧语法，导致 slave_status scraper 报 SQL 1064）
   mysqld-exporter:
-    image: prom/mysqld-exporter:v0.15.1
+    image: docker.m.daocloud.io/library/prom/mysqld-exporter:v0.15.1
     container_name: ptp-mysqld-exporter
     restart: unless-stopped
     command:
@@ -91,7 +91,7 @@ services:
 
   # Elasticsearch：JVM 堆、索引大小、查询延迟
   elasticsearch-exporter:
-    image: quay.io/prometheuscommunity/elasticsearch-exporter:v1.7.0
+    image: docker.m.daocloud.io/library/quay.io/prometheuscommunity/elasticsearch-exporter:v1.7.0
     container_name: ptp-es-exporter
     restart: unless-stopped
     command:

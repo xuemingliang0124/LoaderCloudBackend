@@ -5,7 +5,7 @@ name: ptp
 
 services:
   mysql:
-    image: mysql:8.4.10
+    image: docker.m.daocloud.io/library/mysql:8.4.10
     environment:
       MYSQL_ROOT_PASSWORD: root123456
       MYSQL_DATABASE: ptp
@@ -28,7 +28,7 @@ services:
       - "--collation-server=utf8mb4_unicode_ci"
 
   minio:
-    image: minio/minio:latest
+    image: docker.m.daocloud.io/library/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -42,7 +42,7 @@ services:
       - minio_data:/data
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    image: docker.m.daocloud.io/library/docker.elastic.co/elasticsearch/elasticsearch:8.14.3
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -53,7 +53,8 @@ services:
       - es_data:/usr/share/elasticsearch/data
 
   kibana:
-    build: ./kibana
+    # 生产从 ACR 拉取；本地开发由 docker-compose.override.yml 注入 build: ./kibana
+    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/ptp}/ptp-kibana:${IMAGE_TAG:-latest}
     ports:
       - "5601:5601"
     depends_on:
@@ -64,7 +65,7 @@ services:
   # 选用 Qdrant 单容器：Rust 实现 + async SDK 原生，契合 ptp-dev 3.1 异步约束。
   # ES 仅保留 pt-summary/pt-metrics 职责，不再扩展 dense_vector。
   qdrant:
-    image: qdrant/qdrant:v1.11.5
+    image: docker.m.daocloud.io/library/qdrant/qdrant:v1.11.5
     environment:
       QDRANT__SERVICE__GRPC_PORT: 6334
     ports:
@@ -74,7 +75,8 @@ services:
       - qdrant_data:/qdrant/storage
 
   master:
-    build: ../master
+    # 生产从 ACR 拉取；本地开发由 docker-compose.override.yml 注入 build: ../master
+    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/ptp}/ptp-master:${IMAGE_TAG:-latest}
     # 容器配置统一来自 deploy/.env（env_file 注入容器；该文件同时是 compose 插值源）
     env_file:
       - .env

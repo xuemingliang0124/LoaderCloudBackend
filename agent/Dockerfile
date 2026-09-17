@@ -1,4 +1,4 @@
-FROM python:3.12.14-slim
+FROM docker.m.daocloud.io/library/python:3.12.14-slim
 
 ENV TZ=Asia/Shanghai
 

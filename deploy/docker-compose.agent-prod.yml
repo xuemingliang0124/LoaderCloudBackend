@@ -3,19 +3,17 @@
 # 本文件只引用预构建的镜像，不包含任何源码路径，可安全分发给外部压测机。
 # 镜像由开发/CI 机器构建后推送到私有镜像仓库，或用 docker save/load 离线分发。
 #
-# 一、镜像构建与分发（在有源码的机器上执行）：
-#   1) 构建：
-#      docker build -t ptp-agent:<tag> ./agent
-#   2) 推送私有仓库（推荐）：
-#      docker tag ptp-agent:<tag> <registry>/ptp-agent:<tag>
-#      docker push <registry>/ptp-agent:<tag>
-#   3) 或离线分发为 tar：
-#      docker save -o ptp-agent-<tag>.tar ptp-agent:<tag>
+# 一、镜像构建与分发（CI/有源码的机器上执行）：
+#   1) 构建并推送 ACR：
+#      docker build -t ${REGISTRY}/ptp-agent:${IMAGE_TAG} ./agent
+#      docker push ${REGISTRY}/ptp-agent:${IMAGE_TAG}
+#   2) 或离线分发为 tar：
+#      docker save -o ptp-agent-${IMAGE_TAG}.tar ${REGISTRY}/ptp-agent:${IMAGE_TAG}
 #      # 拷贝到压力机后：
-#      docker load -i ptp-agent-<tag>.tar
+#      docker load -i ptp-agent-${IMAGE_TAG}.tar
 #
 # 二、压力机启动（bridge 模式，跨机部署）：
-#   AGENT_IMAGE=<registry>/ptp-agent:<tag> \
+#   REGISTRY=<acr-registry> IMAGE_TAG=<tag> \
 #   MASTER_WS_URL=ws://<master-host>:8000/ws/agent \
 #   AGENT_ID=agent-01 TAGS=机房A \
 #   docker compose -f docker-compose.agent-prod.yml up -d
@@ -27,7 +25,8 @@ name: ptp-agent
 
 services:
   agent:
-    image: ${AGENT_IMAGE:-ptp-agent:latest}
+    # 从 ACR 拉取；REGISTRY/IMAGE_TAG 由部署脚本注入，与 master 侧保持一致
+    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/ptp}/ptp-agent:${IMAGE_TAG:-latest}
     # Linux 压测机取消下一行注释以使用 host 网络（生产必须）
     # network_mode: host
     environment:
