@@ -85,8 +85,13 @@ pipeline {
                                 "$DEPLOY_HOST:$DEPLOY_DIR/"
 
                             # 2. 同步 .env（gitignored，从 Jenkins 凭据注入）
+                            #    Windows 上传的 Secret file 可能带 CRLF，值尾 \r 会污染
+                            #    MYSQL_PASSWORD/URL 等变量，先规范化为 LF
+                            ENV_FILE_CLEAN=$(mktemp)
+                            tr -d '\\r' < "$ENV_FILE" > "$ENV_FILE_CLEAN"
                             scp -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no \\
-                                "$ENV_FILE" "$DEPLOY_HOST/.env"
+                                "$ENV_FILE_CLEAN" "$DEPLOY_HOST:$DEPLOY_DIR/.env"
+                            rm -f "$ENV_FILE_CLEAN"
 
                             # 3. SSH 到目标机执行 pull + up
                             #    注意：显式 -f docker-compose.yml 会禁用 override.yml 自动加载，生产仅 pull 不构建
