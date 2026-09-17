@@ -64,7 +64,7 @@ pipeline {
                 script {
                     withCredentials([
                         file(credentialsId: 'SSH_KEY',       variable: 'SSH_KEY_FILE'),
-                        text(credentialsId: 'DEPLOY_HOST',   variable: 'DEPLOY_HOST'),
+                        string(credentialsId: 'DEPLOY_HOST', variable: 'DEPLOY_HOST'),
                         file(credentialsId: 'PTP_ENV_FILE',  variable: 'ENV_FILE')
                     ]) {
                         sh '''
