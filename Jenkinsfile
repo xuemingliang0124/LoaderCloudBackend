@@ -70,23 +70,33 @@ pipeline {
                         sh '''
                             set -e
 
+                            # 0. 规范化 SSH 私钥：Windows 上传的 Secret file 常带 CRLF，
+                            #    OpenSSH 的 libcrypto 无法解析 \r，会报 "error in libcrypto"。
+                            #    复制到临时文件 → 去 \r → 权限 600，避免直接修改凭据原文件。
+                            SSH_KEY_CLEAN=$(mktemp)
+                            sed -i 's/\\r$//' "$SSH_KEY_FILE" 2>/dev/null || true
+                            tr -d '\\r' < "$SSH_KEY_FILE" > "$SSH_KEY_CLEAN"
+                            chmod 600 "$SSH_KEY_CLEAN"
+
                             # 1. 同步 compose 文件到目标机（仅 compose，不含源码）
-                            scp -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no \\
+                            scp -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no \\
                                 deploy/docker-compose.yml \\
                                 deploy/docker-compose.agent-prod.yml \\
                                 "$DEPLOY_HOST:$DEPLOY_DIR/"
 
                             # 2. 同步 .env（gitignored，从 Jenkins 凭据注入）
-                            scp -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no \\
+                            scp -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no \\
                                 "$ENV_FILE" "$DEPLOY_HOST/.env"
 
                             # 3. SSH 到目标机执行 pull + up
                             #    注意：显式 -f docker-compose.yml 会禁用 override.yml 自动加载，生产仅 pull 不构建
-                            ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
                                 "cd $DEPLOY_DIR && \\
                                  export REGISTRY=$REGISTRY IMAGE_TAG=$IMAGE_TAG && \\
                                  docker compose -f docker-compose.yml pull && \\
                                  docker compose -f docker-compose.yml up -d"
+
+                            rm -f "$SSH_KEY_CLEAN"
                         '''
                     }
                 }
