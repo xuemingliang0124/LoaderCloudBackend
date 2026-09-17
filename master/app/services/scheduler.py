@@ -77,6 +77,28 @@ def remove_job(job_pk: int) -> None:
         _scheduler.remove_job(job_id(job_pk))
 
 
+def enqueue_date_job(func, job_key: str, run_date, args: list | None = None) -> None:
+    """注册一次性延迟任务（如资产解析，D3）：到点执行 func(*args)。
+
+    - func 必须为模块级函数（SQLAlchemyJobStore 按引用序列化，lambda 不可用）
+    - 幂等 replace：同 job_key 重复投递仅保留最新一次
+    - 调度器未启动（测试/未启用）时仅告警，调用方可直接同步执行兜底
+    """
+    if _scheduler is None:
+        logger.warning(f"调度器未启动，延迟任务 {job_key} 未投递")
+        return
+    _scheduler.add_job(
+        func,
+        trigger="date",
+        run_date=run_date,
+        args=args or [],
+        id=job_key,
+        replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
+    )
+
+
 async def launch_scheduled_run(scenario_id: int, job_pk: int) -> None:
     """定时触发入口：只做下发，不承载执行。"""
     from app.services.orchestrator import create_run  # 延迟 import 防循环依赖

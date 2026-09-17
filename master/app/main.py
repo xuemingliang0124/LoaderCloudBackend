@@ -1,6 +1,7 @@
 """Master 入口：lifespan 初始化 + 路由挂载 + 全局异常处理。
 
-启动顺序：建表(dev 兜底) → 默认用户 → ES 索引 → MinIO bucket → 调度器 → 离线检测。
+启动顺序：建表(dev 兜底) → 默认用户 → ES 索引 → Qdrant collection →
+MinIO bucket → 调度器 → 离线检测。
 """
 
 import asyncio
@@ -16,6 +17,7 @@ from app.db.session import engine
 from app.metrics import setup_metrics
 from app.models import Base
 from app.services import es_client, orchestrator, storage, user_service
+from app.services import vector_store
 from app.services.agent_registry import mark_stale_agents_offline
 from app.services.exceptions import BusinessError
 from app.services.scheduler import start_scheduler, stop_scheduler
@@ -62,6 +64,8 @@ async def lifespan(_: FastAPI):
     await _retry("MySQL", _init_db)
     await user_service.ensure_default_user()
     await _retry("Elasticsearch", es_client.ensure_indices)
+    # 向量库 collection（D2 引入，pt-knowledge 语义检索）
+    await _retry("Qdrant", vector_store.get_vector_store().ensure_collection)
     await _retry("MinIO", storage.ensure_bucket)
     # 一次性迁移历史脚本级插件到全局插件池（jmeter_script.plugins → jmeter_plugin）
     try:

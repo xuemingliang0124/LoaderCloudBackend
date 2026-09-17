@@ -9,6 +9,12 @@ alembic>=1.13
 apscheduler>=3.10,<4.0
 elasticsearch[async]>=8.14,<9.0
 miniopy-async>=1.20
+# 向量库（D2 引入）：Qdrant async SDK，承担 pt-knowledge 语义检索
+qdrant-client>=1.11
+# 文档解析管道（D3 引入）：docx/xlsx/pdf 资产解析
+python-docx>=1.1
+openpyxl>=3.1
+pdfplumber>=0.11
 python-jose[cryptography]>=3.3
 bcrypt>=4.0
 python-multipart>=0.0.9

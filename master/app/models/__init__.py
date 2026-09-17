@@ -2,11 +2,14 @@
 
 from app.models.agent_node import AgentNode
 from app.models.agent_plugin import AgentPlugin
+from app.models.asset import Asset
 from app.models.base import Base, IntPkMixin, TimestampMixin
 from app.models.environment import Environment
 from app.models.enums import (
     AgentPhase,
     AgentStatus,
+    AssetStatus,
+    AssetType,
     GlobalRole,
     ProjectRole,
     RunStatus,
@@ -31,6 +34,9 @@ __all__ = [
     "AgentPhase",
     "AgentPlugin",
     "AgentStatus",
+    "Asset",
+    "AssetStatus",
+    "AssetType",
     "Base",
     "IntPkMixin",
     "Environment",

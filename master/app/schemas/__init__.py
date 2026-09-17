@@ -4,7 +4,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.models.enums import GlobalRole, ProjectRole, ScenarioType
+from app.models.enums import (
+    AssetStatus,
+    AssetType,
+    GlobalRole,
+    ProjectRole,
+    ScenarioType,
+)
 
 
 class LoginIn(BaseModel):
@@ -614,5 +620,82 @@ class UserOut(BaseModel):
     id: int
     username: str
     role: str  # 中文角色名（管理员/普通用户）
+    created_at: datetime
+    updated_at: datetime
+
+
+class AssetIn(BaseModel):
+    """上传文档资产请求（multipart 表单字段校验模型）。
+
+    上传接口实际用 Form 接收字段，再用本模型做统一校验；
+    name 缺省时取上传文件名（去扩展名）。
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "asset_type": "env_inventory",
+                "name": "生产环境交付清单",
+                "description": "2026Q3 生产环境主机与中间件清单",
+            }
+        }
+    )
+
+    asset_type: AssetType
+    name: str | None = Field(default=None, max_length=256)
+    description: str = Field(default="", max_length=512)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        return v or None
+
+
+class AssetUpdateIn(BaseModel):
+    """更新资产元数据请求：仅名称/描述/类型可改，文件本体不可替换。
+
+    至少传一项；asset_type 变更受文件扩展名约束（与上传时校验一致）。
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=256)
+    description: str | None = Field(default=None, max_length=512)
+    asset_type: AssetType | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("资产名称不能为空")
+        return v
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "AssetUpdateIn":
+        if self.name is None and self.description is None and self.asset_type is None:
+            raise ValueError("至少提供一个更新字段")
+        return self
+
+
+class AssetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    project_id: int
+    name: str
+    asset_type: AssetType
+    status: AssetStatus
+    filename: str
+    file_key: str
+    hash_sha256: str
+    file_size: int
+    content_type: str
+    description: str
+    parse_meta: dict | None
+    created_by: str
     created_at: datetime
     updated_at: datetime

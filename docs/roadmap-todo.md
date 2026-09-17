@@ -126,64 +126,95 @@
 
 解决"用户上传一次，系统自动理解可用"的核心痛点。
 
-### D1 资产元数据表 + 上传接口（契约先行）
+### D1 资产元数据表 + 上传接口 ✅ 已完成（2026-09-16）
 - **新增文件**：
-  - `master/app/models/asset.py`（ORM，含 `asset_type`/`status` 枚举）
-  - `master/app/schemas/asset.py`
-  - `master/app/api/v1/assets.py`（POST 上传 / GET 列表 / GET 详情 / DELETE）
-  - `master/alembic/versions/xxx_add_assets.py`
-  - `master/tests/test_assets.py`
-- **修改文件**：`master/app/models/enums.py` 加 `AssetType`(plan_doc/env_inventory/txn_inventory/sla_doc/architecture_doc)、`AssetStatus`(PENDING/PARSING/READY/FAILED)
-- **存储 key 规范**：MinIO `ptp` bucket `assets/{asset_id}/{原文件名}`（参照 ptp-dev 4.6 产物路径约定）
-- **去重**：`hash_sha256` 索引，同项目内重复上传直接复用
+  - `master/app/models/asset.py`（ORM）
+  - `master/app/api/v1/assets.py`（路由）
+  - `master/alembic/versions/20260916d1_asset.py`
+  - `master/tests/test_assets.py`（24 用例）
+- **修改文件**：
+  - `master/app/models/enums.py`（加 `AssetType`/`AssetStatus` 枚举）
+  - `master/app/models/__init__.py`（导出 Asset/AssetType/AssetStatus）
+  - `master/app/schemas/__init__.py`（AssetIn/UpdateIn/Out 集中定义）
+  - `master/app/api/v1/__init__.py`（注册 assets 路由）
+  - `master/app/api/v1/projects.py`（删除预检加 assets 计数；3023 严格阻断含文档资产；force 级联补资产 bulk delete + MinIO 清理）
+  - `master/tests/test_projects.py`（force 响应断言补 removed_assets；级联清理校验加 test_asset 表）
+- **域模型字段**：`id, project_id, name, asset_type, status, filename, file_key, hash_sha256, file_size, content_type, description, parse_meta(JSON), created_by`
+- **关键约束**：
+  - `(project_id, hash_sha256)` 项目内唯一：同内容重复上传返回原 asset_id（reused=true），不重复存 MinIO
+  - 资产类型 ↔ 扩展名映射：plan_doc/sla_doc/architecture_doc→docx/doc/pdf(+pptx)、env_inventory/txn_inventory→xlsx/xls，不匹配 3060
+  - 上传即入库 status=PENDING（D3 异步解析管道推进 PARSING→READY/FAILED）
+  - 存储 key 规范：MinIO `ptp` bucket `assets/{asset_id}/{原文件名}`
+  - viewer+ 可查、editor+ 上传/更新/删除（文件类资产口径同 scripts，非 owner 才能删）
+  - 表名 `test_asset`；FK→test_project 默认 RESTRICT（同 environment/transaction），项目 force 删除在应用层 bulk delete 资产
+  - 错误码段 3060 起：3060 扩展名与资产类型不匹配 / 3061 资产不存在 / 3062 跨项目
 - **验收**：上传 .docx/.xlsx 落地 MinIO + assets 表 PENDING；同 hash 二次上传返回原 asset_id
 - **工作量**：2 天
 
-### D2 ES `pt-knowledge` 索引 + 向量检索 API
-- **修改文件**：`master/app/services/es_client.py` 加 `_KNOWLEDGE_MAPPING` + `ensure_knowledge_index()` + `index_knowledge_chunks()` + `search_knowledge()`
-- **mapping 草案**：
-  ```
-  asset_id(keyword), project_id(keyword), asset_type(keyword),
-  chunk_index(int), text_chunk(text), source_type(keyword),
-  source_ref(keyword), embedding(dense_vector, dims=1024,
-  index=true, similarity=cosine), created_at(date)
-  ```
-- **新增 API**：`GET /api/v1/assets/knowledge-search?project_id=&q=&top_k=`（kNN 召回）
-- **验收**：索引创建 + kNN 查询返回 chunks 列表
-- **依赖**：D1 完成
-- **工作量**：1.5 天
-
-### D3 文档解析管道（核心，避免人工录入）
-- **新增文件**：`master/app/services/asset_parser.py`
-- **依赖库**（先确认 pyproject.toml 中无则新增）：`python-docx`、`openpyxl`、`pdfplumber`
-- **关键设计**：
-  - 全部解析逻辑用 `asyncio.to_thread` 包裹（ptp-dev 3.1 强约束）
-  - 按 MIME/扩展名分发：docx→python-docx、xlsx→openpyxl、pdf→pdfplumber
-  - 双路输出：
-    - (a) 文本切片（300-500 字/段，带 overlap 50 字）→ embedding → ES `pt-knowledge`
-    - (b) 表格行 → 按列映射规则 → MySQL environments/transactions 表
-- **列映射规则配置**（写在 `asset_parser.py` 顶部常量）：
+### D2 Qdrant 向量库 + 检索 API（抽象层先行，便于后续切 Milvus）
+- **选型理由**：ES `dense_vector` 大规模召回性能差且与 `pt-metrics`/`pt-summary` 争 JVM heap；专用向量库（Qdrant Rust 实现、单容器部署、async SDK 原生）更契合 ptp-dev 3.1 异步约束；同时本项目作练手用，采用主流向量库技术栈
+- **新增文件**：
+  - `master/app/services/vector_store.py`（VectorStore Protocol + QdrantVectorStore 实现 + `get_vector_store()` 工厂）
+- **修改文件**：
+  - `master/app/core/config.py` 加 `vector_provider`/`qdrant_url`/`qdrant_api_key`/`qdrant_collection`/`embedding_dims`
+  - `deploy/docker-compose.yml` 加 `qdrant` 服务（单容器，无 HA 需求）
+  - `deploy/docker-compose.monitoring.yml` 加 Qdrant exporter（可选）
+- **抽象层设计**（迁移 Milvus 仅需新增一个实现类，业务层 0 改动）：
   ```python
-  ENV_INVENTORY_COLUMN_MAP = {"环境名称": "name", "基础URL": "base_url", ...}
-  TXN_INVENTORY_COLUMN_MAP = {"交易码": "txn_code", "交易名称": "name", ...}
+  class VectorStore(Protocol):
+      async def ensure_collection(self) -> None: ...
+      async def upsert_chunks(self, points: list[ChunkDoc]) -> None: ...
+      async def search(self, project_id: int, query_vec: list[float],
+                       top_k: int, filters: dict | None = None) -> list[ChunkHit]: ...
   ```
-- **集成 APScheduler**：上传后投递解析任务，避免阻塞上传响应
-- **状态机**：PENDING → PARSING → READY / FAILED；FAILED 可前端一键重试
-- **验收**：上传环境交付清单.xlsx，几秒后 `environments` 表自动新增对应行；上传性能测试方案.docx，`pt-knowledge` 出现 chunks
-- **依赖**：D1 + D2 + A1 + A2（结构化抽取依赖环境/交易表已存在）
+- **迁移友好约定**（落地时必须遵守，降低未来切 Milvus 成本）：
+  - chunk 主键用 **int64 自增**（Qdrant/Milvus 均原生支持；勿用 UUID，Milvus 主键推荐 int64）
+  - filter 用 **Python dict 表达**，由各 Store 实现翻译为各自语法（Qdrant `FieldCondition` / Milvus `expr` 字符串）
+  - 业务层（asset_parser/embedding_client/assets.py）**只依赖 VectorStore 协议**，禁止 import Qdrant SDK
+  - 配置驱动切换：`VECTOR_PROVIDER=qdrant|milvus`，工厂方法分支
+- **collection schema**（Qdrant payload 模型）：
+  - vector：`embedding`（dims=1024，Distance.COSINE）
+  - payload：`asset_id`(int)/`project_id`(int)/`asset_type`(str)/`chunk_index`(int)/`text_chunk`(str)/`source_type`(str)/`source_ref`(str)/`created_at`(datetime)
+- **新增 API**：`GET /api/v1/assets/knowledge-search?project_id=&q=&top_k=`（Qdrant filter + search 召回）
+- **ES 职责不变**：`pt-summary`/`pt-metrics` 仍由 [es_client.py](file:///d:/PycharmProjects/LoaderCloudBackendV2/master/app/services/es_client.py) 承担，不再扩展向量职责
+- **验收**：collection 创建 + 检索返回 chunks 列表；`VECTOR_PROVIDER=qdrant` 可正常切换
+- **依赖**：D1 完成
+- **工作量**：2 天（含抽象层设计）
+
+### D3 文档解析管道 ✅ 已完成（2026-09-16）
+- **新增文件**：
+  - `master/app/services/asset_parser.py`（解析分发/切片/列映射/结构化抽取/状态机）
+  - `master/app/services/embedding_client.py`（D4 一并落地，见下）
+  - `master/tests/test_asset_parser.py`（18 单测）
+  - `master/tests/test_asset_parse_pipeline.py`（12 集成测）
+- **修改文件**：
+  - `master/requirements.txt`（python-docx/openpyxl/pdfplumber）
+  - `master/app/core/config.py`（EMBEDDING_PROVIDER/BASE_URL/API_KEY/MODEL/BATCH_SIZE/TIMEOUT/MAX_RETRIES）
+  - `master/app/services/scheduler.py`（新增通用 `enqueue_date_job` 一次性延迟任务入口）
+  - `master/app/api/v1/assets.py`（上传后 `schedule_asset_parse` 投递 + POST retry-parse 端点）
+- **关键设计**：
+  - 全部解析 `asyncio.to_thread` 包裹；docx→python-docx / xlsx→openpyxl / pdf→pdfplumber；.doc/.xls/.pptx 旧格式 → FAILED 并提示另存
+  - 双路输出：(a) 文本切片（500 字上限、overlap 50，段落贪心聚合+超长硬切）→ embedding → Qdrant（经 VectorStore 协议）；(b) 表格行 → 列映射（ENV/TXN_INVENTORY_COLUMN_MAP 顶部常量，归一化表头匹配）→ environments/transactions 表
+  - 宽松取值：列表字段（JSON 数组/逗号分号顿号换行切分）、variables（JSON dict/k=v 键值对）、数值（容忍 %/千分位/单位后缀 120ms）
+  - 表头识别 = 首个命中 ≥2 映射列的行；未匹配表头记 `parse_meta.unmatched_columns`（供 D5 remap）
+  - 去重三层：项目内已有 env_code/txn_code 跳过、文件内重复跳过、缺编码行跳过，全部记 warnings（parse_meta，上限 50 条）
+  - 交易默认脚本按名称关联项目内 jmeter_script，未命中记警告置 NULL
+  - 状态机 PENDING→PARSING→READY/FAILED 用 Core update() CAS（`status != parsing` 才置 parsing）幂等防重入，规避异步会话身份映射陷阱
+  - 未配置 Embedding 降级：结构化抽取照常，仅跳过向量入库（indexed=false）
+  - point_id = crc32(f"{asset_id}:{chunk_index}") 确定性 int64，重解析幂等覆盖（切片变少时旧向量残留，VectorStore 协议待扩展 delete_by_filter）
+  - 向量 payload：source_type="asset"、source_ref=file_key、asset_type=类型值
+- **验收**：上传环境交付清单.xlsx 解析后 environments 表自动新增行（含 hosts/variables 宽松解析）；上传 .docx 方案 chunks 入向量库（mock embedding+store）；失败/旧格式/重试全链路 30 用例覆盖
+- **依赖**：D1 + D2 + A1 + A2 ✅
 - **工作量**：4-5 天
 
-### D4 Embedding 调用层（异步、批量、可重试）
+### D4 Embedding 调用层 ✅ 已完成（2026-09-16，随 D3 一并落地）
 - **新增文件**：`master/app/services/embedding_client.py`
-- **修改文件**：`master/app/core/config.py` 加 `EMBEDDING_PROVIDER`/`EMBEDDING_API_KEY`/`EMBEDDING_MODEL`/`EMBEDDING_DIMS`
 - **关键约束**：
-  - 必须用 `httpx.AsyncClient`（ptp-dev 3.1），禁止同步阻塞
-  - 批量化：单请求最多 64 段
-  - 失败指数退避，3 次失败标记 asset FAILED
-- **Provider 起步建议**：智谱 `embedding-3` 或阿里 `text-embedding-v3`（1024 维，国内网络可达）
-- **本地化备选**（中长期）：bge-large-zh-v1.5 ONNX，部署在 Agent 侧或独立 micro service
-- **验收**：64 段文本调用一次成功，写入 ES 后 kNN 查询能召回
-- **依赖**：D2
+  - httpx.AsyncClient（ptp-dev 3.1）；单请求最多 64 段（EMBEDDING_BATCH_SIZE）；指数退避重试 3 次（EMBEDDING_MAX_RETRIES），耗尽抛 EmbeddingError → 资产 FAILED
+  - OpenAI 兼容 /embeddings 协议：EMBEDDING_BASE_URL 显式配置 > provider 默认值（zhipu→open.bigmodel.cn/api/paas/v4、dashscope→compatible-mode/v1）
+  - 返回按 index 排序保证顺序一致；段数不符直接报错
+- **验收**：mock 客户端验证批量切片一次调用成功、写入向量库可召回路径；真实 provider 联调待配置 API key（智谱 embedding-3 / 阿里 text-embedding-v3，1024 维）
+- **依赖**：D2 ✅
 - **工作量**：2 天
 
 ### D5 列映射修正接口（兜底，避免硬编码失败）
@@ -225,7 +256,7 @@
   - `query_metrics(run_no, agg)` → 复用 `master/app/metrics.py` 已埋点
   - `get_slow_queries(window)`
   - `get_realtime_summary` 已存在
-- **RAG 归因**：异常时从 `pt-knowledge` 召回 `source_type=domain_doc`（如 `docs/perf-monitoring-and-login-bottleneck.md`）做相似故障对照
+- **RAG 归因**：异常时从 Qdrant 召回 `source_type=domain_doc`（如 `docs/perf-monitoring-and-login-bottleneck.md`）做相似故障对照
 - **依赖**：L1 + D2 + 现有 metrics 埋点
 - **工作量**：3 天
 
@@ -235,7 +266,7 @@
   1. Function Calling 拉 run summary + metrics 聚合 + MinIO JTL/HTML 抽取关键统计
   2. LLM 生成 Markdown 报告
   3. 写回 MinIO `reports/{run_no}/llm-report.md`
-  4. 切 chunk + embedding → `pt-knowledge`（source_type=report，供下次相似报告召回）
+  4. 切 chunk + embedding → Qdrant（source_type=report，供下次相似报告召回）
 - **依赖**：L1 + D2 + D4
 - **工作量**：3-4 天
 
@@ -270,6 +301,7 @@
 - LLM 编排层（`master/app/services/llm/`）单独成为容量热点
 - Agent WS 长连接服务（`master/app/ws/`）连接数突破单 worker 上限
 - ES 写入（`master/app/services/es_client.py`）成为指标链路瓶颈
+- 向量检索（`master/app/services/vector_store.py`）成为 RAG 链路瓶颈
 
 **优先拆分顺序**：
 1. 指标域（ES Client + 独立部署）—— 容量压力最先显现
@@ -297,3 +329,4 @@
 ### X3 配置规范
 - 所有新配置项走 `master/app/core/config.py` + `.env.example`
 - 禁止硬编码 LLM/Embedding API key（ptp-dev 3.3）
+- 向量库相关配置统一走 `VECTOR_PROVIDER`/`QDRANT_URL`/`EMBEDDING_DIMS` 等环境变量；业务层禁止 import 具体 SDK，只依赖 `VectorStore` 协议（D2 抽象层约定）

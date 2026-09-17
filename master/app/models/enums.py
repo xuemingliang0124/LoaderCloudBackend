@@ -62,3 +62,33 @@ class GlobalRole(str, Enum):
 
     ADMIN = "管理员"
     USER = "普通用户"
+
+
+class AssetType(str, Enum):
+    """文档资产类型：决定 D3 解析管道的处理路径与列映射规则。
+
+    - plan_doc：测试方案文档（docx/pdf）→ 文本切片入向量库
+    - env_inventory：环境交付清单（xlsx）→ 结构化抽取到 test_environment
+    - txn_inventory：交易清单（xlsx）→ 结构化抽取到 test_transaction
+    - sla_doc：SLA 指标文档（docx/pdf）→ 文本切片入向量库
+    - architecture_doc：架构说明文档（docx/pdf/pptx）→ 文本切片入向量库
+    """
+
+    PLAN_DOC = "plan_doc"
+    ENV_INVENTORY = "env_inventory"
+    TXN_INVENTORY = "txn_inventory"
+    SLA_DOC = "sla_doc"
+    ARCHITECTURE_DOC = "architecture_doc"
+
+
+class AssetStatus(str, Enum):
+    """文档资产解析状态机：PENDING → PARSING → READY / FAILED。
+
+    D1 仅落 PENDING（上传即入库，解析由 D3 异步管道推进）；
+    FAILED 状态支持前端一键重试解析（D3）。
+    """
+
+    PENDING = "pending"
+    PARSING = "parsing"
+    READY = "ready"
+    FAILED = "failed"
