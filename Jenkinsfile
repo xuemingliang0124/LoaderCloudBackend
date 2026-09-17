@@ -14,7 +14,7 @@ pipeline {
 
     environment {
         // 阿里云容器镜像服务（ACR）命名空间
-        REGISTRY    = 'registry.cn-hangzhou.aliyuncs.com/ptp'
+        REGISTRY    = 'registry.cn-beijing.aliyuncs.com/xml066'
         // 镜像标签 = 构建号 + git 短 sha，便于追溯与回滚；同时打 latest
         IMAGE_TAG   = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
         // 目标部署路径

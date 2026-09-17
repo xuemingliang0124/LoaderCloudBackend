@@ -54,7 +54,7 @@ services:
 
   kibana:
     # 生产从 ACR 拉取；本地开发由 docker-compose.override.yml 注入 build: ./kibana
-    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/ptp}/ptp-kibana:${IMAGE_TAG:-latest}
+    image: ${REGISTRY:-registry.cn-beijing.aliyuncs.com/xml066}/ptp-kibana:${IMAGE_TAG:-latest}
     ports:
       - "5601:5601"
     depends_on:
@@ -76,7 +76,7 @@ services:
 
   master:
     # 生产从 ACR 拉取；本地开发由 docker-compose.override.yml 注入 build: ../master
-    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/ptp}/ptp-master:${IMAGE_TAG:-latest}
+    image: ${REGISTRY:-registry.cn-beijing.aliyuncs.com/xml066}/ptp-master:${IMAGE_TAG:-latest}
     # 容器配置统一来自 deploy/.env（env_file 注入容器；该文件同时是 compose 插值源）
     env_file:
       - .env
