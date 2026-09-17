@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, ensure_project_access, get_current_user
 from app.db.session import get_db
+from app.models.asset import Asset
 from app.models.enums import ProjectRole, RunStatus
 from app.models.environment import Environment
 from app.models.project import Project
@@ -206,6 +207,13 @@ async def precheck_project_delete(
             .where(Transaction.project_id == project_id)
         )
     ) or 0
+    assets = (
+        await db.scalar(
+            select(func.count())
+            .select_from(Asset)
+            .where(Asset.project_id == project_id)
+        )
+    ) or 0
     running_runs = 0
     schedule_jobs: list = []
     if scenario_ids:
@@ -232,6 +240,7 @@ async def precheck_project_delete(
             "scripts": int(scripts),
             "environments": int(environments),
             "transactions": int(transactions),
+            "assets": int(assets),
             "scenarios": len(scenario_ids),
             "running_runs": int(running_runs),
             "schedule_jobs": [{"id": r.id, "name": r.name} for r in schedule_jobs],
@@ -269,6 +278,11 @@ async def delete_project(
         .scalars()
         .all()
     )
+    asset_rows = (
+        (await db.execute(select(Asset).where(Asset.project_id == project_id)))
+        .scalars()
+        .all()
+    )
     env_count = (
         await db.scalar(
             select(func.count())
@@ -283,6 +297,7 @@ async def delete_project(
             .where(Transaction.project_id == project_id)
         )
     ) or 0
+    asset_count = len(asset_rows)
 
     # 未结束的执行任务：force 也不例外，必须先停止（与场景删除口径一致 3014）
     if scenario_ids:
@@ -302,10 +317,12 @@ async def delete_project(
                 code=3014,
             )
 
-    if not force and (script_rows or scenario_ids or env_count or txn_count):
+    if not force and (
+        script_rows or scenario_ids or env_count or txn_count or asset_count
+    ):
         raise BusinessError(
             f"项目下存在 {len(script_rows)} 个脚本、{env_count} 个环境、"
-            f"{txn_count} 个交易、{len(scenario_ids)} 个场景，无法删除；"
+            f"{txn_count} 个交易、{asset_count} 个文档资产、{len(scenario_ids)} 个场景，无法删除；"
             "请先通过删除预检接口确认后携带 force=true 强制删除",
             code=3023,
         )
@@ -376,6 +393,8 @@ async def delete_project(
         await db.execute(
             delete(Transaction).where(Transaction.project_id == project_id)
         )
+        # 文档资产行：bulk delete 解除 test_project RESTRICT 外键
+        await db.execute(delete(Asset).where(Asset.project_id == project_id))
 
     # 项目 + 成员关系（成员 FK 虽为 CASCADE，显式删除保证各库行为一致）
     await db.execute(
@@ -393,6 +412,17 @@ async def delete_project(
         )
     for run_no in run_nos:
         removed_artifacts += await storage_service.delete_prefix(f"runs/{run_no}/")
+    for asset in asset_rows:
+        if asset.file_key:
+            try:
+                await storage_service.delete_object(asset.file_key)
+                removed_artifacts += 1
+            except Exception:  # noqa: BLE001
+                from loguru import logger
+
+                logger.warning(
+                    f"项目 {project_id} 资产 MinIO 对象删除失败: {asset.file_key}"
+                )
 
     return ok(
         {
@@ -402,6 +432,7 @@ async def delete_project(
             "removed_scripts": len(script_rows) if force else 0,
             "removed_environments": int(env_count) if force else 0,
             "removed_transactions": int(txn_count) if force else 0,
+            "removed_assets": int(asset_count) if force else 0,
             "removed_scenarios": len(scenario_ids) if force else 0,
             "removed_runs": len(run_nos),
             "removed_schedules": len(schedule_rows) if force else 0,
