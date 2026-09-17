@@ -63,9 +63,10 @@ pipeline {
             steps {
                 script {
                     withCredentials([
-                        file(credentialsId: 'SSH_KEY',       variable: 'SSH_KEY_FILE'),
-                        string(credentialsId: 'DEPLOY_HOST', variable: 'DEPLOY_HOST'),
-                        file(credentialsId: 'PTP_ENV_FILE',  variable: 'ENV_FILE')
+                        file(credentialsId: 'SSH_KEY',            variable: 'SSH_KEY_FILE'),
+                        string(credentialsId: 'DEPLOY_HOST',      variable: 'DEPLOY_HOST'),
+                        file(credentialsId: 'PTP_ENV_FILE',       variable: 'ENV_FILE'),
+                        file(credentialsId: 'ACR_DOCKER_CONFIG',  variable: 'DOCKER_CONFIG_FILE')
                     ]) {
                         sh '''
                             set -e
@@ -93,7 +94,19 @@ pipeline {
                                 "$ENV_FILE_CLEAN" "$DEPLOY_HOST:$DEPLOY_DIR/.env"
                             rm -f "$ENV_FILE_CLEAN"
 
-                            # 3. SSH 到目标机执行 pull + up
+                            # 3. 配置目标机 ACR 认证：复用构建阶段的 docker config.json
+                            #    推送到目标机 ~/.docker/config.json，pull 私有镜像时免密
+                            DOCKER_CONFIG_CLEAN=$(mktemp)
+                            tr -d '\\r' < "$DOCKER_CONFIG_FILE" > "$DOCKER_CONFIG_CLEAN"
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                                "mkdir -p ~/.docker && chmod 700 ~/.docker"
+                            scp -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no \\
+                                "$DOCKER_CONFIG_CLEAN" "$DEPLOY_HOST:.docker/config.json"
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                                "chmod 600 ~/.docker/config.json"
+                            rm -f "$DOCKER_CONFIG_CLEAN"
+
+                            # 4. SSH 到目标机执行 pull + up
                             #    注意：显式 -f docker-compose.yml 会禁用 override.yml 自动加载，生产仅 pull 不构建
                             ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
                                 "cd $DEPLOY_DIR && \\
