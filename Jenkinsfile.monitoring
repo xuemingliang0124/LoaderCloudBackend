@@ -39,8 +39,18 @@ pipeline {
 
         stage('Validate Compose') {
             steps {
-                // 仅做语法/结构校验，不与基础 compose 合并（本机没有目标机的 .env）
-                sh 'docker compose -f deploy/docker-compose.monitoring.yml config -q'
+                // 必须按实际部署方式合并两个 compose 一起校验：
+                // mysqld-exporter/elasticsearch-exporter 的 depends_on 引用基础栈的
+                // mysql/elasticsearch，单独校验监控文件会报
+                // "depends on undefined service"。
+                // 基础 compose 的 master 服务声明了 env_file: .env（gitignored 不入库），
+                // compose 解析期即要求文件存在；所有插值变量均带 :- 默认值，
+                // 用空文件占位即可，校验结束立即删除（trap 兜底）。
+                sh '''
+                    touch deploy/.env
+                    trap 'rm -f deploy/.env' EXIT
+                    docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml config -q
+                '''
             }
         }
 
