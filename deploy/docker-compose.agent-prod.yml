@@ -26,7 +26,7 @@ name: ptp-agent
 services:
   agent:
     # 从 ACR 拉取；REGISTRY/IMAGE_TAG 由部署脚本注入，与 master 侧保持一致
-    image: ${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/ptp}/ptp-agent:${IMAGE_TAG:-latest}
+    image: ${REGISTRY:-registry.cn-beijing.aliyuncs.com/xml066}/ptp-agent:${IMAGE_TAG:-latest}
     # Linux 压测机取消下一行注释以使用 host 网络（生产必须）
     # network_mode: host
     environment:
