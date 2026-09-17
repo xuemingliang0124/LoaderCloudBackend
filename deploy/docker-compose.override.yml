@@ -1,0 +1,14 @@
+# 本地开发覆盖层：为 master/kibana 注入 build 上下文，启用 `docker compose up --build`。
+#
+# 加载规则（关键）：
+#   - 开发机：直接 `docker compose up --build` → compose 自动合并本文件，走本地构建
+#   - 生产机：必须 `docker compose -f docker-compose.yml up -d` → 显式 -f 会禁用 override 自动加载，仅 pull
+#
+# 本文件可提交到 git；生产部署脚本不要用默认隐式加载即可。
+
+services:
+  kibana:
+    build: ./kibana
+
+  master:
+    build: ../master

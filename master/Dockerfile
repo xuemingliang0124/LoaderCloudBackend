@@ -1,4 +1,4 @@
-FROM python:3.12.14-slim
+FROM docker.m.daocloud.io/library/python:3.12.14-slim
 
 # 时区：与 mysql/agent 对齐为 Asia/Shanghai，保证 datetime.now()/run_no 时间戳为北京墙钟
 ENV TZ=Asia/Shanghai
