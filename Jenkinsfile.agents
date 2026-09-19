@@ -1,0 +1,94 @@
+// Jenkins Pipeline：批量部署/升级压力机 Agent（独立流水线，不随 master 构建自动触发）
+//
+// 触发方式（由你控制的 hook）：
+//   - Jenkins Remote Access API：
+//       curl -X POST "${JENKINS_URL}/job/ptp-agent-deploy/buildWithParameters" \
+//            --user "user:api_token" \
+//            --data "IMAGE_TAG=42-a1b2c3d&USE_HOST_NETWORK=true"
+//   - 或在 Jenkins Job 里配置 Generic Webhook / Build Triggers 触发（hook 端传上述参数）
+//   - IMAGE_TAG 一般取 master 流水线构建出的 tag（如 42-a1b2c3d），由 hook 端从镜像仓库
+//     或主流水线产物传入，保证部署的是已推送成功的镜像。
+//
+// 前置条件（Jenkins 凭据配置）：
+//   1) ACR_DOCKER_CONFIG   — Secret file，目标机 pull 私有镜像用的 docker config.json
+//   2) SSH_KEY             — Secret file，压力机的 SSH 私钥
+//   3) MASTER_API_USER     — Secret text，Master 平台账号（忙检测查 GET /api/v1/agents 用）
+//   4) MASTER_API_PASS     — Secret text，对应密码
+//
+// Jenkins 控制器依赖：ansible >= 2.14 + community.docker collection
+//   ansible-galaxy collection install community.docker
+//
+// 压力机要求：已装 docker + compose plugin；Ansible 连通；清单见 deploy/ansible/inventory.yml。
+
+pipeline {
+    agent any
+
+    parameters {
+        // 由 hook 传入：要部署的镜像 tag（必须是 master 流水线已 push 到 ACR 的版本）
+        string(name: 'IMAGE_TAG',       defaultValue: 'latest', description: '要部署的 ptp-agent 镜像 tag（如 42-a1b2c3d）')
+        // 大多数 Linux 压测机用 host 网络；Docker Desktop 机器在 inventory 分组里覆盖 use_host_network=false
+        booleanParam(name: 'USE_HOST_NETWORK', defaultValue: true,  description: '压力机 host 网络模式')
+    }
+
+    environment {
+        // 阿里云容器镜像服务（ACR）命名空间，与 master 流水线保持一致
+        REGISTRY = 'registry.cn-beijing.aliyuncs.com/xml066'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Deploy Agents via Ansible') {
+            steps {
+                script {
+                    withCredentials([
+                        file(credentialsId:   'SSH_KEY',           variable: 'SSH_KEY_FILE'),
+                        file(credentialsId:   'ACR_DOCKER_CONFIG', variable: 'DOCKER_CONFIG_FILE'),
+                        string(credentialsId: 'MASTER_API_USER',   variable: 'MASTER_API_USER'),
+                        string(credentialsId: 'MASTER_API_PASS',   variable: 'MASTER_API_PASS')
+                    ]) {
+                        sh '''
+                            set -e
+
+                            # 规范化 SSH 私钥（Windows 上传常带 CRLF，OpenSSH 无法解析 \\r）
+                            SSH_KEY_CLEAN=$(mktemp)
+                            tr -d '\\r' < "$SSH_KEY_FILE" > "$SSH_KEY_CLEAN"
+                            chmod 600 "$SSH_KEY_CLEAN"
+
+                            # ACR 免密配置：由 playbook 复制到各压力机 /root/.docker/config.json
+                            ACR_CONFIG_CLEAN=$(mktemp)
+                            tr -d '\\r' < "$DOCKER_CONFIG_FILE" > "$ACR_CONFIG_CLEAN"
+
+                            # 忙检测走 MASTER_API_USER/PASS（withCredentials 注入环境变量，
+                            # playbook 内 lookup('env', ...) 读取）；忙机器自动跳过并在结尾置失败，
+                            # 避开压测窗口后用 --limit 重跑即可
+                            ansible-playbook \\
+                                -i deploy/ansible/inventory.yml \\
+                                deploy/ansible/deploy-agent.yml \\
+                                -e image_tag="$IMAGE_TAG" \\
+                                -e use_host_network="$USE_HOST_NETWORK" \\
+                                -e docker_config_src="$ACR_CONFIG_CLEAN" \\
+                                --private-key "$SSH_KEY_CLEAN" \\
+                                --ssh-common-args='-o StrictHostKeyChecking=no'
+
+                            rm -f "$SSH_KEY_CLEAN" "$ACR_CONFIG_CLEAN"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Agent 部署完成：镜像 ${IMAGE_TAG} 已推送至压力机"
+        }
+        failure {
+            echo "❌ Agent 部署失败，请查看上方日志（注意忙机器会导致置失败，属预期行为）"
+        }
+    }
+}

@@ -1,0 +1,35 @@
+# 压力机清单（Ansible inventory）
+# 按机房/环境分组，便于灰度（--limit room_a）与差异化变量（tags / 网络模式）。
+# agent_ip 默认取 ansible_host；若压力机经 NAT 出网、Master 看到的 IP 不同，
+# 在该主机下显式指定 agent_ip。
+---
+all:
+  vars:
+    ansible_user: appuser
+    # Master 地址：WS 供 Agent 回连，HTTP 供部署期忙检测（按环境改这两行）
+    master_ws_url: ws://master.internal:8000/ws/agent
+    master_api_base: http://master.internal:8000/api/v1
+  children:
+    room_a:
+      vars:
+        tags: "机房A"
+      hosts:
+        press-01: { ansible_host: 10.0.1.11 }
+        press-02: { ansible_host: 10.0.1.12 }
+        press-03: { ansible_host: 10.0.1.13 }
+    room_b:
+      vars:
+        tags: "机房B"
+      hosts:
+        # NAT 出网机器：Master 看到的是出口 IP，需显式 agent_ip
+        press-10: { ansible_host: 10.0.2.21, agent_ip: 172.16.8.21 }
+        press-11: { ansible_host: 10.0.2.22, agent_ip: 172.16.8.22 }
+    # Windows / Docker Desktop 机器：host 网络不可用，须以 bridge 模式运行，
+    # 分组内覆盖 use_host_network（对应 compose 模板里的条件渲染）
+    docker_desktop_lab:
+      vars:
+        tags: "办公网"
+        use_host_network: false
+        master_ws_url: ws://host.docker.internal:8000/ws/agent
+      hosts:
+        press-win-01: { ansible_host: 10.0.3.31 }

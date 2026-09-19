@@ -1,0 +1,171 @@
+---
+# =============================================================================
+# Agent 批量部署/升级 playbook（配合 inventory.yml 使用）
+#
+# 用法：
+#   ansible-playbook -i inventory.yml deploy-agent.yml -e image_tag=42-a1b2c3d
+#   ansible-playbook -i inventory.yml deploy-agent.yml --limit room_a       # 灰度
+#   ansible-playbook -i inventory.yml deploy-agent.yml -e busy_action=wait  # 忙机器等待而非跳过
+#
+# 控制器依赖：ansible >= 2.14 + community.docker collection
+#   ansible-galaxy collection install community.docker
+# 目标机依赖：docker + docker compose plugin；SSH 用户可 sudo（become）
+#
+# 忙检测（避让正在执行的场景）：
+#   经 Master GET /api/v1/agents 查询本机 Agent（按 IP 精确匹配）。心跳带
+#   current_run_no 时 status=busy → 默认整机跳过（不写配置、不重启），结尾汇总
+#   并置失败，提示稍后 --limit 重跑；-e busy_action=wait 改为轮询等待空闲。
+#
+# 已知竞态窗口：任务下发 → 首个 BUSY 心跳存在 ≤10s 空隙，且检测与重启间有秒级
+#   间隙；请避开定时压测窗口执行部署。彻底根治需 Master 提供 drain（调度屏蔽）
+#   能力，属后续迭代。
+# =============================================================================
+- name: 部署 / 升级 Agent（忙机器自动避让）
+  hosts: all
+  become: true
+  gather_facts: false
+  # 滚动批次：Agent 重启会断 WS，Master 30s 心跳超时会判 OFFLINE；
+  # 一次只动 N 台，避免整批失联影响进行中的 run
+  serial: "{{ ansible_serial | default(5) }}"
+
+  vars:
+    registry: registry.cn-beijing.aliyuncs.com/xml066
+    image_tag: latest
+    deploy_dir: /opt/ptp
+    agent_workspace: /data/ptp_agent/workspace
+    agent_compose_file: docker-compose.agent.yml
+    # 网络模式：true → network_mode: host（Linux 生产推荐，压测吞吐必须）
+    #           false → bridge + extra_hosts（Docker Desktop 等不支持 host 网络）
+    # inventory 可按分组覆盖；Jenkins 以 -e use_host_network= 注入
+    use_host_network: true
+    # Master 地址默认值（建议在 inventory all.vars 覆盖）
+    master_ws_url: ws://127.0.0.1:8000/ws/agent
+    master_api_base: http://127.0.0.1:8000/api/v1
+    master_api_user: "{{ lookup('env', 'MASTER_API_USER') | default('admin', true) }}"
+    master_api_pass: "{{ lookup('env', 'MASTER_API_PASS') }}"
+    # 忙机器处理：skip=跳过（结尾汇总可置失败）；wait=轮询等待空闲再更新
+    busy_action: skip
+    busy_wait_timeout: 1800
+    busy_wait_interval: 30
+    fail_on_busy: true
+    # ACR 免密配置（控制器侧路径；文件不存在则跳过复制，视镜像为公开）
+    docker_config_src: "{{ lookup('env', 'HOME') }}/.docker/config.json"
+    # Master 看到的 Agent IP 默认与 ansible_host 一致（NAT 机器在 inventory 指定 agent_ip）
+    agent_ip: "{{ ansible_host }}"
+
+  tasks:
+    - name: 校验必填配置
+      ansible.builtin.assert:
+        that:
+          - master_api_user | length > 0
+          - master_api_pass | length > 0
+          - busy_action in ['skip', 'wait']
+        fail_msg: "缺少 Master API 凭据或 busy_action 非法：需注入环境变量 MASTER_API_USER / MASTER_API_PASS"
+
+    # ---------- 忙检测（delegate 到控制器执行，不依赖目标机） ----------
+
+    - name: 登录 Master 获取 JWT（每个滚动批次重新登录，规避长等待 token 过期）
+      ansible.builtin.uri:
+        url: "{{ master_api_base }}/auth/login"
+        method: POST
+        body_format: json
+        body:
+          username: "{{ master_api_user }}"
+          password: "{{ master_api_pass }}"
+        status_code: 200
+      register: master_login
+      delegate_to: localhost
+      become: false
+
+    - name: 查询本机 Agent 状态（keyword 按 IP 粗筛，本地精确比对）
+      ansible.builtin.uri:
+        url: "{{ master_api_base }}/agents?keyword={{ agent_ip | urlencode }}&page_size=100"
+        headers:
+          Authorization: "Bearer {{ master_login.json.data.token }}"
+        status_code: 200
+      register: agent_probe
+      delegate_to: localhost
+      become: false
+      # skip 模式：查一次即过；wait 模式：轮询直到该机器不在 busy 名单
+      until: >-
+        busy_action == 'skip'
+        or (agent_probe.json.data.items | selectattr('ip', 'equalto', agent_ip)
+            | selectattr('status', 'equalto', 'busy') | list | length == 0)
+      retries: "{{ 1 if busy_action == 'skip' else (busy_wait_timeout // busy_wait_interval) | int }}"
+      delay: "{{ 0 if busy_action == 'skip' else busy_wait_interval }}"
+
+    - name: 判定本机是否忙（IP 精确匹配 status=busy；未注册/离线视为空闲）
+      ansible.builtin.set_fact:
+        agent_busy: >-
+          {{ agent_probe.json.data.items | selectattr('ip', 'equalto', agent_ip)
+             | selectattr('status', 'equalto', 'busy') | list | length > 0 }}
+
+    - name: 因忙跳过提示
+      ansible.builtin.debug:
+        msg: >-
+          Agent {{ agent_ip }} 正在执行场景（status=busy），跳过本次更新；
+          稍后可用 --limit 单独重跑，或 -e busy_action=wait 等待空闲
+      when: agent_busy
+
+    # ---------- 部署（仅空闲机器执行） ----------
+
+    - name: 确保部署目录存在
+      ansible.builtin.file:
+        path: "{{ deploy_dir }}"
+        state: directory
+        mode: "0755"
+      when: not agent_busy
+
+    - name: 渲染 Agent compose 配置（network_mode 由 use_host_network 决定）
+      ansible.builtin.template:
+        src: docker-compose.agent.j2
+        dest: "{{ deploy_dir }}/{{ agent_compose_file }}"
+        mode: "0644"
+      when: not agent_busy
+
+    - name: 下发 ACR 免密配置（控制器文件存在才复制；目标机 root 的 docker 凭据）
+      ansible.builtin.copy:
+        src: "{{ docker_config_src }}"
+        dest: /root/.docker/config.json
+        mode: "0600"
+      when: not agent_busy and docker_config_src is exists
+
+    - name: 拉取新镜像并按需重建容器
+      community.docker.docker_compose_v2:
+        project_src: "{{ deploy_dir }}"
+        files:
+          - "{{ deploy_dir }}/{{ agent_compose_file }}"
+        state: present
+        pull: always
+      when: not agent_busy
+
+# ---------- 结果汇总（独立 play：跨滚动批次聚合） ----------
+- name: 汇总部署结果
+  hosts: all
+  gather_facts: false
+  vars:
+    fail_on_busy: true
+  tasks:
+    - name: 统计因忙跳过的节点
+      ansible.builtin.set_fact:
+        busy_skipped: "{{ busy_skipped | default([]) + [item] }}"
+      loop: "{{ groups['all'] }}"
+      when: hostvars[item].agent_busy | default(false) | bool
+      run_once: true
+
+    - name: 输出汇总
+      ansible.builtin.debug:
+        msg: >-
+          {{ groups['all'] | length }} 台压力机处理完成；
+          因忙跳过 {{ busy_skipped | default([]) | length }} 台{{
+          ': ' + (busy_skipped | default([]) | join(', ')) if busy_skipped | default([]) else '' }}
+      run_once: true
+
+    - name: 忙节点存在时置失败（-e fail_on_busy=false 可关闭）
+      ansible.builtin.fail:
+        msg: >-
+          有 {{ busy_skipped | default([]) | length }} 台因忙跳过：
+          {{ busy_skipped | default([]) | join(', ') }}。
+          请避开压测窗口后用 --limit 重跑这些机器，或 -e busy_action=wait 等待空闲
+      when: fail_on_busy | bool and busy_skipped | default([]) | length > 0
+      run_once: true

@@ -1,0 +1,33 @@
+# 由 Ansible 渲染（deploy/ansible/templates/docker-compose.agent.j2），请勿手改。
+# 镜像：{{ registry }}/ptp-agent:{{ image_tag }}
+name: ptp-agent
+
+services:
+  agent:
+    image: {{ registry }}/ptp-agent:{{ image_tag }}
+{% if use_host_network | bool %}
+    # host 网络绕过 bridge NAT，保证 JMeter 压测吞吐（Linux 生产必须）
+    network_mode: host
+{% else %}
+    # bridge 模式（Docker Desktop 等）；extra_hosts 用于容器回连宿主机 Master
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+{% endif %}
+    environment:
+      MASTER_WS_URL: {{ master_ws_url }}
+      # 留空 → 启动时按宿主机 IP 向 Master 自注册，自动分配并持久化固定 ID
+      AGENT_ID: ""
+      TAGS: "{{ tags | default('default') }}"
+      JMETER_BIN: jmeter
+    # 工作目录挂宿主机 SSD，避免 overlay2 拖慢 JTL/报告 I/O
+    volumes:
+      - {{ agent_workspace }}:/app/agent_workspace
+    # 高并发压测的文件描述符与端口范围（勿删）
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+      net.ipv4.tcp_tw_reuse: "1"
+    restart: unless-stopped

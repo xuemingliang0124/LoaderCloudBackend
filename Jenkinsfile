@@ -1,10 +1,14 @@
-// Jenkins Pipeline：构建 master/agent/kibana 镜像 → 推送阿里云 ACR → SSH 远程部署
+// Jenkins Pipeline：构建 master/agent/kibana 镜像 → 推送阿里云 ACR → SSH 部署 master
+//
+// 职责边界：本流水线只做镜像构建 + master 部署。Agent 批量部署由独立流水线
+//   Jenkinsfile.agents 承担，通过 hook 触发，接收镜像 tag 后跑 Ansible 升级。
+//   解耦目的：master 构建与压测机升级互不影响，升级时机由 hook 自行控制。
 //
 // 前置条件（Jenkins 凭据配置）：
 //   1) ACR_DOCKER_CONFIG   — Secret file，内容为 `docker login` 后生成的 ~/.docker/config.json
 //   2) SSH_KEY             — Secret file，目标部署服务器的 SSH 私钥（对应目标机 authorized_keys）
 //   3) DEPLOY_HOST         — Secret text，格式 user@ip（如 deployer@10.0.0.10）
-//   4) PTP_ENV_FILE        — Secret file，目标机 deploy/.env 的完整内容（gitignored，不入库）
+//   4) PTP_ENV_FILE       — Secret file，目标机 deploy/.env 的完整内容（gitignored，不入库）
 //
 // 目标服务器要求：已安装 docker + docker compose plugin，SSH 公钥已加入 authorized_keys，
 //   部署目录 /opt/ptp 已存在且 SSH 用户有写权限。
