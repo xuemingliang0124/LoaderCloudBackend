@@ -1,0 +1,17 @@
+# 压力机清单（Ansible inventory）
+# 按机房/环境分组，便于灰度（--limit room_a）与差异化变量（tags / 网络模式）。
+# agent_ip 默认取 ansible_host；若压力机经 NAT 出网、Master 看到的 IP 不同，
+# 在该主机下显式指定 agent_ip。
+---
+all:
+  vars:
+    ansible_user: appuser
+    # Master 地址：WS 供 Agent 回连，HTTP 供部署期忙检测（按环境改这两行）
+    master_ws_url: ws://192.168.0.102:8000/ws/agent
+    master_api_base: http://192.168.0.102:8000/api/v1
+  children:
+    room_a:
+      vars:
+        tags: "机房A"
+      hosts:
+        press-01: { ansible_host: 192.168.0.105 }
