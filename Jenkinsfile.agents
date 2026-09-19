@@ -14,6 +14,8 @@
 //   2) SSH_KEY             — Secret file，压力机的 SSH 私钥
 //   3) MASTER_API_USER     — Secret text，Master 平台账号（忙检测查 GET /api/v1/agents 用）
 //   4) MASTER_API_PASS     — Secret text，对应密码
+//   5) AGENT_SSH_PASS      — Secret text，压力机 appuser 的 SSH 登录密码（仅用于
+//      密钥认证失败的新机器引导装公钥；未配置时新机器将保持部署失败）
 //
 // Jenkins 控制器依赖：ansible >= 2.14 + community.docker collection
 //   ansible-galaxy collection install community.docker
@@ -52,7 +54,8 @@ pipeline {
                         file(credentialsId:   'SSH_KEY',           variable: 'SSH_KEY_FILE'),
                         file(credentialsId:   'ACR_DOCKER_CONFIG', variable: 'DOCKER_CONFIG_FILE'),
                         string(credentialsId: 'MASTER_API_USER',   variable: 'MASTER_API_USER'),
-                        string(credentialsId: 'MASTER_API_PASS',   variable: 'MASTER_API_PASS')
+                        string(credentialsId: 'MASTER_API_PASS',   variable: 'MASTER_API_PASS'),
+                        string(credentialsId: 'AGENT_SSH_PASS',    variable: 'AGENT_SSH_PASS')
                     ]) {
                         sh '''
                             set -e
@@ -61,6 +64,11 @@ pipeline {
                             SSH_KEY_CLEAN=$(mktemp)
                             tr -d '\\r' < "$SSH_KEY_FILE" > "$SSH_KEY_CLEAN"
                             chmod 600 "$SSH_KEY_CLEAN"
+
+                            # 从 CI 私钥导出对应公钥：playbook 在密钥认证失败时经密码登录
+                            # （AGENT_SSH_PASS 环境变量）将其装进目标机 authorized_keys，
+                            # 实现新机器免手工配公钥
+                            BOOTSTRAP_PUBKEY=$(ssh-keygen -y -f "$SSH_KEY_CLEAN")
 
                             # ACR 免密配置：由 playbook 复制到各压力机 /root/.docker/config.json
                             ACR_CONFIG_CLEAN=$(mktemp)
@@ -76,9 +84,10 @@ pipeline {
                                 -e use_host_network="$USE_HOST_NETWORK" \
                                 -e master_api_base="$MASTER_API_BASE" \
                                 -e master_ws_url="$MASTER_WS_URL" \
-                                -e docker_config_src="$ACR_CONFIG_CLEAN" \\
-                                --private-key "$SSH_KEY_CLEAN" \\
-                                --ssh-common-args='-o StrictHostKeyChecking=no'
+                                -e bootstrap_pubkey="$BOOTSTRAP_PUBKEY" \
+                                -e docker_config_src="$ACR_CONFIG_CLEAN" \
+                                --private-key "$SSH_KEY_CLEAN" \
+                                --ssh-common-args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 
                             rm -f "$SSH_KEY_CLEAN" "$ACR_CONFIG_CLEAN"
                         '''

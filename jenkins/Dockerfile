@@ -30,14 +30,17 @@ RUN set -eux; \
 
 # 安装 Ansible + community.docker collection（Jenkinsfile.agents 部署 Agent 需要）
 # ansible-core 轻量够用，无需完整 ansible 包；
+# sshpass 是 Ansible 密码认证（ansible_ssh_pass）的控制器侧硬依赖，
+# 用于压力机密钥认证失败时引导装公钥；
 # collection 必须装到系统路径 /usr/share/ansible/collections，
 # 否则装到 root 家目录后，降权的 jenkins 用户无法访问
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends python3-pip; \
+    apt-get install -y --no-install-recommends python3-pip sshpass; \
     pip3 install --break-system-packages --no-cache-dir "ansible-core>=2.14"; \
     ansible-galaxy collection install community.docker -p /usr/share/ansible/collections; \
     ansible-playbook --version; \
+    sshpass -V; \
     rm -rf /var/lib/apt/lists/*
 
 # 容器以 root 启动，entrypoint 中完成 GID 对齐后降权为 jenkins
