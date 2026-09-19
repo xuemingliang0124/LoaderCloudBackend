@@ -16,11 +16,14 @@
 #   current_run_no 时 status=busy → 默认整机跳过（不写配置、不重启），结尾汇总
 #   并置失败，提示稍后 --limit 重跑；-e busy_action=wait 改为轮询等待空闲。
 #
-# 密钥认证引导（新机器免手工装公钥）：
+# 密钥认证引导（新机器免手工初始化）：
 #   Play1 用 CI 私钥探活；密钥认证不通的主机（新装/重装机器未装公钥）由
 #   Play2 归入 ssh_bootstrap 动态组，Play3 以密码登录（环境变量 AGENT_SSH_PASS，
-#   Jenkins 凭据注入，不出现在进程命令行）安装公钥（bootstrap_pubkey，由
-#   Jenkins 从 CI 私钥 ssh-keygen -y 导出）。未配置密码时跳过引导，保持旧行为。
+#   Jenkins 凭据注入，不出现在进程命令行）完成机器初始化：
+#   ① 安装公钥（bootstrap_pubkey，由 Jenkins 从 CI 私钥 ssh-keygen -y 导出）；
+#   ② 配置 appuser 免密 sudo（/etc/sudoers.d/，供主 play become 使用；
+#      sudo 密码取 AGENT_SSH_PASS，要求与 SSH 登录密码一致）。
+#   未配置密码时跳过引导，保持旧行为。
 #   前提：目标机 appuser 已存在且 sshd 允许密码认证（PasswordAuthentication yes）。
 #
 # 已知竞态窗口：任务下发 → 首个 BUSY 心跳存在 ≤10s 空隙，且检测与重启间有秒级
@@ -58,11 +61,11 @@
         - key_probe.unreachable is defined
         - bootstrap_ssh_pass | length > 0
 
-# ---------- Play 3：密码登录引导安装公钥 ----------
-- name: 引导：密码登录安装公钥（安装后后续运行即密钥认证）
+# ---------- Play 3：密码登录机器初始化 ----------
+- name: 引导：密码登录机器初始化（装公钥 + 免密 sudo）
   hosts: ssh_bootstrap
   gather_facts: false
-  # 写 appuser 自己的家目录，无需 become（新机器 sudo 可能尚未配置）
+  # 写 appuser 自己的家目录无需 become；sudoers 提权在对应任务级单独 become
   become: false
   tasks:
     - name: 校验引导参数
@@ -86,6 +89,18 @@
         create: true
         owner: "{{ ansible_user }}"
         mode: "0600"
+
+    # 机器初始化第二步：免密 sudo，供主 play become 使用（此后 sudo 密码不再被需要）。
+    # sudo 密码取 AGENT_SSH_PASS（要求与 SSH 登录密码一致）；已配置 NOPASSWD 的
+    # 机器本任务幂等跳过。validate 走 visudo 防止写坏 sudoers
+    - name: 配置免密 sudo（NOPASSWD，机器初始化）
+      ansible.builtin.copy:
+        content: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
+        dest: "/etc/sudoers.d/{{ ansible_user }}"
+        mode: "0440"
+        validate: "/usr/sbin/visudo -cf %s"
+      become: true
+      become_pass: "{{ bootstrap_ssh_pass }}"
 
 - name: 部署 / 升级 Agent（忙机器自动避让）
   hosts: all
@@ -116,6 +131,10 @@
     fail_on_busy: true
     # ACR 免密配置（控制器侧路径；文件不存在则跳过复制，视镜像为公开）
     docker_config_src: "{{ lookup('env', 'HOME') }}/.docker/config.json"
+    # become（sudo）密码：默认复用 AGENT_SSH_PASS，假设 sudo 密码与 SSH 登录密码一致。
+    # 已配置 NOPASSWD sudoers 的机器不会用到本值；两者不一致的机器必须走 NOPASSWD，
+    # 否则报 Incorrect sudo password。AGENT_SSH_PASS 未注入时行为同旧版（报 Missing sudo password）
+    ansible_become_pass: "{{ lookup('env', 'AGENT_SSH_PASS') }}"
     # Master 看到的 Agent IP 默认与 ansible_host 一致（NAT 机器在 inventory 指定 agent_ip）
     agent_ip: "{{ ansible_host }}"
 
