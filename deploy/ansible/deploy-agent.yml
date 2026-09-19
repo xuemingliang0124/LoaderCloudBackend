@@ -234,6 +234,24 @@
         mode: "0600"
       when: not agent_busy and docker_config_src is exists
 
+    # host 网络下 Docker 禁止容器设置 net.* sysctl（runc: not allowed in host
+    # network namespace），压测端口调优转为宿主机级持久化（bridge 模式仍由
+    # compose 模板内 sysctls 承担，无需本任务）
+    - name: 宿主机内核网络调优（host 网络模式专属）
+      ansible.builtin.copy:
+        content: |
+          # ptp-agent 压测调优：临时端口范围 + TIME_WAIT 复用（部署流水线维护）
+          net.ipv4.ip_local_port_range = 1024 65535
+          net.ipv4.tcp_tw_reuse = 1
+        dest: /etc/sysctl.d/99-ptp-agent.conf
+        mode: "0644"
+      when: use_host_network | bool
+
+    - name: 加载内核网络参数
+      ansible.builtin.command: sysctl -p /etc/sysctl.d/99-ptp-agent.conf
+      when: use_host_network | bool
+      changed_when: false
+
     - name: 拉取新镜像并按需重建容器
       community.docker.docker_compose_v2:
         project_src: "{{ deploy_dir }}"

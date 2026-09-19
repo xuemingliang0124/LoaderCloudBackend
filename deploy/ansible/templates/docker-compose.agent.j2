@@ -22,12 +22,17 @@ services:
     # 工作目录挂宿主机 SSD，避免 overlay2 拖慢 JTL/报告 I/O
     volumes:
       - {{ agent_workspace }}:/app/agent_workspace
-    # 高并发压测的文件描述符与端口范围（勿删）
+    # 高并发压测的文件描述符（勿删）；sysctls 仅 bridge 模式可设——
+    # host 网络下容器与宿主共享网络命名空间，Docker 禁止容器内设置 net.* sysctl
+    # （runc: not allowed in host network namespace），该模式下的端口调优由
+    # playbook 写宿主机 /etc/sysctl.d/99-ptp-agent.conf 承担
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
+{% if not (use_host_network | bool) %}
     sysctls:
       net.ipv4.ip_local_port_range: "1024 65535"
       net.ipv4.tcp_tw_reuse: "1"
+{% endif %}
     restart: unless-stopped
