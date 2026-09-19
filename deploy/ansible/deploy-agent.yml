@@ -16,10 +16,77 @@
 #   current_run_no 时 status=busy → 默认整机跳过（不写配置、不重启），结尾汇总
 #   并置失败，提示稍后 --limit 重跑；-e busy_action=wait 改为轮询等待空闲。
 #
+# 密钥认证引导（新机器免手工装公钥）：
+#   Play1 用 CI 私钥探活；密钥认证不通的主机（新装/重装机器未装公钥）由
+#   Play2 归入 ssh_bootstrap 动态组，Play3 以密码登录（环境变量 AGENT_SSH_PASS，
+#   Jenkins 凭据注入，不出现在进程命令行）安装公钥（bootstrap_pubkey，由
+#   Jenkins 从 CI 私钥 ssh-keygen -y 导出）。未配置密码时跳过引导，保持旧行为。
+#   前提：目标机 appuser 已存在且 sshd 允许密码认证（PasswordAuthentication yes）。
+#
 # 已知竞态窗口：任务下发 → 首个 BUSY 心跳存在 ≤10s 空隙，且检测与重启间有秒级
 #   间隙；请避开定时压测窗口执行部署。彻底根治需 Master 提供 drain（调度屏蔽）
 #   能力，属后续迭代。
 # =============================================================================
+
+# ---------- Play 1：SSH 密钥认证预检 ----------
+- name: SSH 密钥认证预检（不通的主机将引导装公钥）
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: 密钥认证探活
+      ansible.builtin.ping:
+      register: key_probe
+      ignore_unreachable: true
+
+# ---------- Play 2：收集需引导的主机（控制器侧操作，不产生目标机连接） ----------
+# unreachable 状态是 per-play 的，Play 1 标记不影响本 play；add_host/set_fact
+# 均为控制器侧 action，无需 SSH。
+- name: 收集密钥认证失败的主机
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: 读取引导密码（环境变量注入，避免出现在进程命令行）
+      ansible.builtin.set_fact:
+        bootstrap_ssh_pass: "{{ lookup('env', 'AGENT_SSH_PASS') }}"
+
+    - name: 归入 ssh_bootstrap 组（携带密码认证参数）
+      ansible.builtin.add_host:
+        name: "{{ inventory_hostname }}"
+        groups: ssh_bootstrap
+        ansible_ssh_pass: "{{ bootstrap_ssh_pass }}"
+      when:
+        - key_probe.unreachable is defined
+        - bootstrap_ssh_pass | length > 0
+
+# ---------- Play 3：密码登录引导安装公钥 ----------
+- name: 引导：密码登录安装公钥（安装后后续运行即密钥认证）
+  hosts: ssh_bootstrap
+  gather_facts: false
+  # 写 appuser 自己的家目录，无需 become（新机器 sudo 可能尚未配置）
+  become: false
+  tasks:
+    - name: 校验引导参数
+      ansible.builtin.assert:
+        that:
+          - bootstrap_pubkey | default('') | length > 0
+        fail_msg: "bootstrap_pubkey 未注入：Jenkins 需以 ssh-keygen -y 从 CI 私钥导出公钥并 -e 传入"
+
+    - name: 确保用户 .ssh 目录存在
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/.ssh"
+        state: directory
+        owner: "{{ ansible_user }}"
+        mode: "0700"
+
+    - name: 安装公钥到 authorized_keys（幂等）
+      ansible.builtin.lineinfile:
+        path: "/home/{{ ansible_user }}/.ssh/authorized_keys"
+        line: "{{ bootstrap_pubkey }}"
+        state: present
+        create: true
+        owner: "{{ ansible_user }}"
+        mode: "0600"
+
 - name: 部署 / 升级 Agent（忙机器自动避让）
   hosts: all
   become: true
