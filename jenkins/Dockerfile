@@ -1,5 +1,5 @@
 # 固定具体 LTS 版本 + JDK21（2.545+ 要求 Java21；写死版本可绕过镜像加速器缓存旧 lts）
-FROM jenkins/jenkins:2.568.3-lts-jdk21
+FROM docker.m.daocloud.io/jenkins/jenkins:2.568.3-lts-jdk21
 
 USER root
 
