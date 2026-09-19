@@ -38,9 +38,8 @@
     #           false → bridge + extra_hosts（Docker Desktop 等不支持 host 网络）
     # inventory 可按分组覆盖；Jenkins 以 -e use_host_network= 注入
     use_host_network: true
-    # Master 地址默认值（建议在 inventory all.vars 覆盖）
-    master_ws_url: ws://127.0.0.1:8000/ws/agent
-    master_api_base: http://127.0.0.1:8000/api/v1
+    # Master 地址不在此定义：play vars 优先级高于 inventory vars，写在这里会
+    # 静默覆盖 inventory all.vars 的配置。改由 pre_task set_fact 兜底默认值。
     master_api_user: "{{ lookup('env', 'MASTER_API_USER') | default('admin', true) }}"
     master_api_pass: "{{ lookup('env', 'MASTER_API_PASS') }}"
     # 忙机器处理：skip=跳过（结尾汇总可置失败）；wait=轮询等待空闲再更新
@@ -52,6 +51,13 @@
     docker_config_src: "{{ lookup('env', 'HOME') }}/.docker/config.json"
     # Master 看到的 Agent IP 默认与 ansible_host 一致（NAT 机器在 inventory 指定 agent_ip）
     agent_ip: "{{ ansible_host }}"
+
+  pre_tasks:
+    # Master 地址：inventory all.vars / Jenkins -e 注入优先；均未配置时回退 127.0.0.1
+    - name: 应用 Master 地址默认值（inventory / extra-vars 可覆盖）
+      ansible.builtin.set_fact:
+        master_ws_url: "{{ master_ws_url | default('ws://127.0.0.1:8000/ws/agent', true) }}"
+        master_api_base: "{{ master_api_base | default('http://127.0.0.1:8000/api/v1', true) }}"
 
   tasks:
     - name: 校验必填配置

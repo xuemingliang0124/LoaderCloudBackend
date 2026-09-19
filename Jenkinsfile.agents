@@ -4,7 +4,7 @@
 //   - Jenkins Remote Access API：
 //       curl -X POST "${JENKINS_URL}/job/ptp-agent-deploy/buildWithParameters" \
 //            --user "user:api_token" \
-//            --data "IMAGE_TAG=42-a1b2c3d&USE_HOST_NETWORK=true"
+//            --data "IMAGE_TAG=42-a1b2c3d&USE_HOST_NETWORK=true&MASTER_API_BASE=http://192.168.0.102:8000/api/v1&MASTER_WS_URL=ws://192.168.0.102:8000/ws/agent"
 //   - 或在 Jenkins Job 里配置 Generic Webhook / Build Triggers 触发（hook 端传上述参数）
 //   - IMAGE_TAG 一般取 master 流水线构建出的 tag（如 42-a1b2c3d），由 hook 端从镜像仓库
 //     或主流水线产物传入，保证部署的是已推送成功的镜像。
@@ -28,6 +28,9 @@ pipeline {
         string(name: 'IMAGE_TAG',       defaultValue: 'latest', description: '要部署的 ptp-agent 镜像 tag（如 42-a1b2c3d）')
         // 大多数 Linux 压测机用 host 网络；Docker Desktop 机器在 inventory 分组里覆盖 use_host_network=false
         booleanParam(name: 'USE_HOST_NETWORK', defaultValue: true,  description: '压力机 host 网络模式')
+        // Master 地址（extra-vars 优先级最高，覆盖 inventory；控制器须能访问该地址做忙检测）
+        string(name: 'MASTER_API_BASE', defaultValue: 'http://192.168.0.102:8000/api/v1', description: 'Master API 基址（忙检测登录/查询用）')
+        string(name: 'MASTER_WS_URL',   defaultValue: 'ws://192.168.0.102:8000/ws/agent',  description: 'Agent 回连 Master 的 WebSocket 地址')
     }
 
     environment {
@@ -66,11 +69,13 @@ pipeline {
                             # 忙检测走 MASTER_API_USER/PASS（withCredentials 注入环境变量，
                             # playbook 内 lookup('env', ...) 读取）；忙机器自动跳过并在结尾置失败，
                             # 避开压测窗口后用 --limit 重跑即可
-                            ansible-playbook \\
-                                -i deploy/ansible/inventory.yml \\
-                                deploy/ansible/deploy-agent.yml \\
-                                -e image_tag="$IMAGE_TAG" \\
-                                -e use_host_network="$USE_HOST_NETWORK" \\
+                            ansible-playbook \
+                                -i deploy/ansible/inventory.yml \
+                                deploy/ansible/deploy-agent.yml \
+                                -e image_tag="$IMAGE_TAG" \
+                                -e use_host_network="$USE_HOST_NETWORK" \
+                                -e master_api_base="$MASTER_API_BASE" \
+                                -e master_ws_url="$MASTER_WS_URL" \
                                 -e docker_config_src="$ACR_CONFIG_CLEAN" \\
                                 --private-key "$SSH_KEY_CLEAN" \\
                                 --ssh-common-args='-o StrictHostKeyChecking=no'

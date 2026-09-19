@@ -108,6 +108,9 @@ pipeline {
                                 "$DOCKER_CONFIG_CLEAN" "$DEPLOY_HOST:.docker/config.json"
                             ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
                                 "chmod 600 ~/.docker/config.json"
+                            # 清理旧镜像
+                            ssh -i "$SSH_KEY_CLEAN" -o StrictHostKeyChecking=no "$DEPLOY_HOST" \\
+                                "docker image prune -f || true"
                             rm -f "$DOCKER_CONFIG_CLEAN"
 
                             # 4. SSH 到目标机执行 pull + up
