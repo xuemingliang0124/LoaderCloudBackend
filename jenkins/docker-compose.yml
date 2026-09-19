@@ -1,0 +1,24 @@
+services:
+  jenkins:
+    # image 字段决定构建后镜像的完整名称，docker compose build 自动打 tag，
+    # docker compose push 可直接推送到阿里云仓库，无需手动 docker tag
+    image: ${REGISTRY}/${JENKINS_IMAGE}:${JENKINS_TAG}
+    build:
+      context: .
+      # 国内网络拉 Docker 官方 apt 源慢时，取消下面两行注释改用阿里云镜像：
+      args:
+        DOCKER_APT_MIRROR: https://mirrors.aliyun.com/docker-ce
+    container_name: loader-cloud-jenkins
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      # 关键：挂载宿主机 docker.sock，让 Jenkins 能操作宿主机 Docker
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+volumes:
+  jenkins_home:
