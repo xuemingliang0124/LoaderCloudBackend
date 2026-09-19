@@ -92,7 +92,8 @@
 
     # 机器初始化第二步：免密 sudo，供主 play become 使用（此后 sudo 密码不再被需要）。
     # sudo 密码取 AGENT_SSH_PASS（要求与 SSH 登录密码一致）；已配置 NOPASSWD 的
-    # 机器本任务幂等跳过。validate 走 visudo 防止写坏 sudoers
+    # 机器本任务幂等跳过。validate 走 visudo 防止写坏 sudoers。
+    # 注意：become 密码必须用 ansible_become_pass 变量（任务关键字无 become_pass）
     - name: 配置免密 sudo（NOPASSWD，机器初始化）
       ansible.builtin.copy:
         content: "{{ ansible_user }} ALL=(ALL) NOPASSWD:ALL\n"
@@ -100,7 +101,8 @@
         mode: "0440"
         validate: "/usr/sbin/visudo -cf %s"
       become: true
-      become_pass: "{{ bootstrap_ssh_pass }}"
+      vars:
+        ansible_become_pass: "{{ bootstrap_ssh_pass }}"
 
 - name: 部署 / 升级 Agent（忙机器自动避让）
   hosts: all
