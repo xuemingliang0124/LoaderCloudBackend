@@ -219,6 +219,14 @@
         mode: "0644"
       when: not agent_busy
 
+    # 新机器 root 从未跑过 docker login，/root/.docker 不存在，需先建目录
+    - name: 确保目标机 /root/.docker 目录存在
+      ansible.builtin.file:
+        path: /root/.docker
+        state: directory
+        mode: "0700"
+      when: not agent_busy and docker_config_src is exists
+
     - name: 下发 ACR 免密配置（控制器文件存在才复制；目标机 root 的 docker 凭据）
       ansible.builtin.copy:
         src: "{{ docker_config_src }}"
