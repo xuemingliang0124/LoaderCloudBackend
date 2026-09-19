@@ -93,9 +93,11 @@
       delegate_to: localhost
       become: false
       # skip 模式：查一次即过；wait 模式：轮询直到该机器不在 busy 名单
+      # 注意 items 必须用 ['items']：dict 自带 .items() 方法，Jinja 属性查找
+      # 会命中方法而非列表键（'method' object is not iterable）
       until: >-
         busy_action == 'skip'
-        or (agent_probe.json.data.items | selectattr('ip', 'equalto', agent_ip)
+        or (agent_probe.json.data['items'] | selectattr('ip', 'equalto', agent_ip)
             | selectattr('status', 'equalto', 'busy') | list | length == 0)
       retries: "{{ 1 if busy_action == 'skip' else (busy_wait_timeout // busy_wait_interval) | int }}"
       delay: "{{ 0 if busy_action == 'skip' else busy_wait_interval }}"
@@ -103,7 +105,7 @@
     - name: 判定本机是否忙（IP 精确匹配 status=busy；未注册/离线视为空闲）
       ansible.builtin.set_fact:
         agent_busy: >-
-          {{ agent_probe.json.data.items | selectattr('ip', 'equalto', agent_ip)
+          {{ agent_probe.json.data['items'] | selectattr('ip', 'equalto', agent_ip)
              | selectattr('status', 'equalto', 'busy') | list | length > 0 }}
 
     - name: 因忙跳过提示
