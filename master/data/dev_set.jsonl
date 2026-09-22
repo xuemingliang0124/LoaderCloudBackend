@@ -1,0 +1,12 @@
+{"id":1,"project_id":1,"question":"登录交易基准压测的 TPS 是多少？","expected_keywords":["tps","480"],"expected_citations_nonempty":true,"run_no":"R20260920001","expected_metrics":["tps"]}
+{"id":2,"project_id":1,"question":"登录交易的 P95 响应时间是多少毫秒？","expected_keywords":["p95","120"],"expected_citations_nonempty":true,"run_no":"R20260920001","expected_metrics":["p95_ms"]}
+{"id":3,"project_id":1,"question":"登录交易的错误率是多少？","expected_keywords":["错误率","0.5"],"expected_citations_nonempty":true,"run_no":"R20260920001","expected_metrics":["error_rate"]}
+{"id":4,"project_id":1,"question":"把生产环境登录交易压到 500 TPS，当前能达标吗？","expected_keywords":["480","500"],"expected_citations_nonempty":true,"run_no":"R20260920001","expected_metrics":["tps"]}
+{"id":5,"project_id":1,"question":"混合场景下各交易的 TPS 表现如何？","expected_keywords":["tps"],"expected_citations_nonempty":true,"run_no":"R20260920002","expected_metrics":["tps"]}
+{"id":6,"project_id":1,"question":"稳定性场景的 P95 延迟趋势如何？","expected_keywords":["p95"],"expected_citations_nonempty":true,"run_no":"R20260920003","expected_metrics":["p95_ms"]}
+{"id":7,"project_id":1,"question":"单交易负载场景的错误率是否在 SLA 范围内？","expected_keywords":["错误率","error"],"expected_citations_nonempty":true,"run_no":"R20260920004","expected_metrics":["error_rate"]}
+{"id":8,"project_id":1,"question":"压测执行 R20260920001 的整体性能表现如何？","expected_keywords":["tps","p95"],"expected_citations_nonempty":true,"run_no":"R20260920001","expected_metrics":["tps","p95_ms"]}
+{"id":9,"project_id":1,"question":"哪些交易的 P95 延迟超过了 SLA 阈值？","expected_keywords":["p95"],"expected_citations_nonempty":true,"run_no":"R20260920002","expected_metrics":["p95_ms"]}
+{"id":10,"project_id":1,"question":"稳定性场景的 TPS 是否达标？","expected_keywords":["tps"],"expected_citations_nonempty":true,"run_no":"R20260920003","expected_metrics":["tps"]}
+{"id":11,"project_id":1,"question":"登录交易压测的样本总数和成功失败数是多少？","expected_keywords":["样本","成功"],"expected_citations_nonempty":true,"run_no":"R20260920001","expected_metrics":[]}
+{"id":12,"project_id":1,"question":"混合场景的错误率是否需要关注？","expected_keywords":["错误率"],"expected_citations_nonempty":true,"run_no":"R20260920002","expected_metrics":["error_rate"]}

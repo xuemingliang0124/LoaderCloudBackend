@@ -67,7 +67,7 @@ services:
   # 选用 Qdrant 单容器：Rust 实现 + async SDK 原生，契合 ptp-dev 3.1 异步约束。
   # ES 仅保留 pt-summary/pt-metrics 职责，不再扩展 dense_vector。
   qdrant:
-    image: docker.m.daocloud.io/qdrant/qdrant:v1.11.5
+    image: docker.m.daocloud.io/qdrant/qdrant:v1.19.1
     environment:
       QDRANT__SERVICE__GRPC_PORT: 6334
     ports:

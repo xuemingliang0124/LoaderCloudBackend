@@ -292,3 +292,93 @@ async def test_search_returns_chunk_hits_with_payload() -> None:
     assert hits[0].score == pytest.approx(0.88)
     assert hits[0].payload["text_chunk"] == "hit-x"
     assert hits[1].point_id == 9
+
+
+# ---- LangChain VectorStore 适配（P3 Stage 2）：PTPQdrant 扁平 payload + 相似度语义 ----
+
+
+@requires_qdrant
+def test_get_langchain_vector_store_offline_construct(monkeypatch) -> None:
+    """离线构造（validate_collection_config=False 不连 Qdrant），参数对齐入库布局。
+
+    - content_payload_key="text_chunk"（对齐 upsert_chunks 文本字段）
+    - vector_name="embedding"（对齐 upsert_chunks 命名向量；SDK 默认无名向量查不到）
+    - embedding 注入 get_embeddings()（未配置 → FakeEmbeddings 降级）
+    """
+    from types import SimpleNamespace
+
+    from langchain_core.embeddings import FakeEmbeddings
+
+    from app.services import vector_store as vs
+
+    fake_base = SimpleNamespace(_client=AsyncMock(), _collection="pt_knowledge")
+    monkeypatch.setattr(vs, "get_vector_store", lambda: fake_base)
+    monkeypatch.setattr(
+        vs_embedding_client_mod(), "get_embeddings", lambda: FakeEmbeddings(size=1024)
+    )
+    vs.reset_langchain_vector_store()
+    store = vs.get_langchain_vector_store()
+    try:
+        assert store.content_payload_key == "text_chunk"
+        assert store.vector_name == "embedding"
+        assert store.collection_name == "pt_knowledge"
+        # 单例
+        assert vs.get_langchain_vector_store() is store
+    finally:
+        vs.reset_langchain_vector_store()
+
+
+def vs_embedding_client_mod():
+    import app.services.embedding_client as emb_mod
+
+    return emb_mod
+
+
+@requires_qdrant
+def test_langchain_store_flat_payload_metadata_and_identity_relevance(monkeypatch) -> None:
+    """PTPQdrant 两处 SDK 覆写：
+
+    1) _document_from_point 读扁平 payload（SDK 默认只读嵌套 metadata 键，
+       扁平结构下 metadata 会丢 → asset_id/asset_type/chunk_index 引用构造依赖）
+    2) _select_relevance_score_fn 恒等映射（Qdrant COSINE 返回相似度，
+       SDK 基类按距离做 1-score 会反转阈值语义）
+    """
+    from types import SimpleNamespace
+
+    from langchain_core.embeddings import FakeEmbeddings
+
+    from app.services import vector_store as vs
+
+    fake_base = SimpleNamespace(_client=AsyncMock(), _collection="pt_knowledge")
+    monkeypatch.setattr(vs, "get_vector_store", lambda: fake_base)
+    monkeypatch.setattr(
+        vs_embedding_client_mod(), "get_embeddings", lambda: FakeEmbeddings(size=1024)
+    )
+    vs.reset_langchain_vector_store()
+    store = vs.get_langchain_vector_store()
+    try:
+        # 恒等 relevance：score_threshold 即"相似度 ≥ 阈值"（SRS FR-05）
+        assert store._select_relevance_score_fn()(0.83) == 0.83
+
+        # 扁平 payload → Document.metadata 全字段（剔除文本字段）
+        point = SimpleNamespace(
+            id=7,
+            payload={
+                "text_chunk": "登录交易 500TPS",
+                "asset_id": 3,
+                "asset_type": "sla_doc",
+                "chunk_index": 1,
+                "project_id": 1,
+            },
+        )
+        doc = type(store)._document_from_point(
+            point, "pt_knowledge", "text_chunk", "payload"
+        )
+        assert doc.page_content == "登录交易 500TPS"
+        assert doc.metadata["asset_id"] == 3
+        assert doc.metadata["asset_type"] == "sla_doc"
+        assert doc.metadata["chunk_index"] == 1
+        assert doc.metadata["_id"] == 7
+        assert "text_chunk" not in doc.metadata
+    finally:
+        vs.reset_langchain_vector_store()

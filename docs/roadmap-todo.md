@@ -3,17 +3,20 @@
 > 整体路径：**方向 2（业务迭代）为主线 → 方向 3（文档资产+LLM）作为后接增值 → 方向 1a（HA）作为并行支线 → 方向 1b（微服务）挂起待驱动**
 >
 > 关键路径：P1.A1 → P1.A2 → P2.D1 → P2.D3 → P3.L1 → P3.L2
+>
+> **当前进度（2026-09-22）**：P1 A1/A2/A3 ✅、P2 D1/D2/D3/D4 ✅、P3 L1/L2/L3/L4 ✅ 全部完成；
+> 待办：A4 测试方案、D5 列映射修正、P4 SUT 监控、P5 微服务（挂起）。
 
 ## 时间线总览
 
-| 阶段 | 时间 | 是否阻塞主线 |
-|------|------|--------------|
-| P0 基础设施 | 0.5 周（并行） | 否 |
-| P1 结构化资产 | 2-3 周 | 是 |
-| P2 文档管道 | 3-4 周 | 是 |
-| P3 LLM 接入 | 3-4 周 | 是 |
-| P4 SUT 监控 | 2 周 | 否（可插队） |
-| P5 微服务 | 挂起 | 触发条件驱动 |
+| 阶段 | 时间 | 是否阻塞主线 | 状态 |
+|------|------|--------------|------|
+| P0 基础设施 | 0.5 周（并行） | 否 | 部分完成（I-1/I-3 待做，I-2 待驱动） |
+| P1 结构化资产 | 2-3 周 | 是 | A1/A2/A3 ✅，A4 待做 |
+| P2 文档管道 | 3-4 周 | 是 | D1/D2/D3/D4 ✅，D5 待做 |
+| P3 LLM 接入 | 3-4 周 | 是 | L1/L2/L3/L4 ✅ 全部完成 |
+| P4 SUT 监控 | 2 周 | 否（可插队） | 待启动 |
+| P5 微服务 | 挂起 | 触发条件驱动 | 挂起 |
 
 ---
 
@@ -151,7 +154,7 @@
 - **验收**：上传 .docx/.xlsx 落地 MinIO + assets 表 PENDING；同 hash 二次上传返回原 asset_id
 - **工作量**：2 天
 
-### D2 Qdrant 向量库 + 检索 API（抽象层先行，便于后续切 Milvus）
+### D2 Qdrant 向量库 + 检索 API（抽象层先行，便于后续切 Milvus）✅ 已完成（2026-09-16，随 D3 一并落地）
 - **选型理由**：ES `dense_vector` 大规模召回性能差且与 `pt-metrics`/`pt-summary` 争 JVM heap；专用向量库（Qdrant Rust 实现、单容器部署、async SDK 原生）更契合 ptp-dev 3.1 异步约束；同时本项目作练手用，采用主流向量库技术栈
 - **新增文件**：
   - `master/app/services/vector_store.py`（VectorStore Protocol + QdrantVectorStore 实现 + `get_vector_store()` 工厂）
@@ -177,43 +180,50 @@
   - payload：`asset_id`(int)/`project_id`(int)/`asset_type`(str)/`chunk_index`(int)/`text_chunk`(str)/`source_type`(str)/`source_ref`(str)/`created_at`(datetime)
 - **新增 API**：`GET /api/v1/assets/knowledge-search?project_id=&q=&top_k=`（Qdrant filter + search 召回）
 - **ES 职责不变**：`pt-summary`/`pt-metrics` 仍由 [es_client.py](file:///d:/PycharmProjects/LoaderCloudBackendV2/master/app/services/es_client.py) 承担，不再扩展向量职责
+- **双抽象共存（P3 Stage 1 补充）**：入库侧用 `VectorStore` Protocol + `QdrantVectorStore`（asset_parser）；检索侧用 LangChain `langchain_qdrant.QdrantVectorStore` 子类 `PTPQdrant`（`get_langchain_vector_store()`，FR-05 as_retriever）。两者共享同一 collection 与 AsyncQdrantClient，PTPQdrant 覆写 `_document_from_point`（扁平 payload）与 `_select_relevance_score_fn`（COSINE 相似度恒等映射）
 - **验收**：collection 创建 + 检索返回 chunks 列表；`VECTOR_PROVIDER=qdrant` 可正常切换
 - **依赖**：D1 完成
 - **工作量**：2 天（含抽象层设计）
 
-### D3 文档解析管道 ✅ 已完成（2026-09-16）
+### D3 文档解析管道 ✅ 已完成（2026-09-16，P3 Stage 1 LangChain 重构）
 - **新增文件**：
-  - `master/app/services/asset_parser.py`（解析分发/切片/列映射/结构化抽取/状态机）
+  - `master/app/services/asset_parser.py`（解析分发/列映射/结构化抽取/状态机）
+  - `master/app/services/langchain_loader.py`（LangChain BaseLoader 适配器，FR-01）
+  - `master/app/services/langchain_pipeline.py`（LCEL 管道：Cleaner → Chunker → Indexer，FR-02/03/04）
   - `master/app/services/embedding_client.py`（D4 一并落地，见下）
   - `master/tests/test_asset_parser.py`（18 单测）
   - `master/tests/test_asset_parse_pipeline.py`（12 集成测）
+  - `master/tests/test_langchain_pipeline.py`（LangChain 管道单测）
 - **修改文件**：
-  - `master/requirements.txt`（python-docx/openpyxl/pdfplumber）
-  - `master/app/core/config.py`（EMBEDDING_PROVIDER/BASE_URL/API_KEY/MODEL/BATCH_SIZE/TIMEOUT/MAX_RETRIES）
+  - `master/requirements.txt`（python-docx/openpyxl/pdfplumber + LangChain 全家桶 + pypdf + rank-bm25）
+  - `master/app/core/config.py`（EMBEDDING_* + CHUNK_SIZE/CHUNK_OVERLAP/TOP_K/SIMILARITY_THRESHOLD/USE_BM25/MAX_CONTEXT_CHARS/METRIC_TOLERANCE）
   - `master/app/services/scheduler.py`（新增通用 `enqueue_date_job` 一次性延迟任务入口）
   - `master/app/api/v1/assets.py`（上传后 `schedule_asset_parse` 投递 + POST retry-parse 端点）
 - **关键设计**：
   - 全部解析 `asyncio.to_thread` 包裹；docx→python-docx / xlsx→openpyxl / pdf→pdfplumber；.doc/.xls/.pptx 旧格式 → FAILED 并提示另存
-  - 双路输出：(a) 文本切片（500 字上限、overlap 50，段落贪心聚合+超长硬切）→ embedding → Qdrant（经 VectorStore 协议）；(b) 表格行 → 列映射（ENV/TXN_INVENTORY_COLUMN_MAP 顶部常量，归一化表头匹配）→ environments/transactions 表
+  - 双路输出：
+    (a) 文本切片：LangChain Cleaner（去页眉/断词修复/非段落换行转空格）→ RecursiveCharacterTextSplitter(500/50，中文分隔符优先级) → Embedding → Qdrant
+    (b) 表格行 → 列映射（ENV/TXN_INVENTORY_COLUMN_MAP 归一化表头匹配）→ environments/transactions 表
   - 宽松取值：列表字段（JSON 数组/逗号分号顿号换行切分）、variables（JSON dict/k=v 键值对）、数值（容忍 %/千分位/单位后缀 120ms）
   - 表头识别 = 首个命中 ≥2 映射列的行；未匹配表头记 `parse_meta.unmatched_columns`（供 D5 remap）
   - 去重三层：项目内已有 env_code/txn_code 跳过、文件内重复跳过、缺编码行跳过，全部记 warnings（parse_meta，上限 50 条）
   - 交易默认脚本按名称关联项目内 jmeter_script，未命中记警告置 NULL
-  - 状态机 PENDING→PARSING→READY/FAILED 用 Core update() CAS（`status != parsing` 才置 parsing）幂等防重入，规避异步会话身份映射陷阱
-  - 未配置 Embedding 降级：结构化抽取照常，仅跳过向量入库（indexed=false）
-  - point_id = crc32(f"{asset_id}:{chunk_index}") 确定性 int64，重解析幂等覆盖（切片变少时旧向量残留，VectorStore 协议待扩展 delete_by_filter）
+  - 状态机 PENDING→PARSING→READY/FAILED 用 Core update() CAS 幂等防重入
+  - **NFR-01 降级语义变更**：未配置 Embedding 时用 `FakeEmbeddings` 入库（indexed=true, degraded=true），不再跳过向量入库，保证端到端链路不中断
+  - point_id = crc32(f"{asset_id}:{chunk_index}") 确定性 int64，重解析幂等覆盖
   - 向量 payload：source_type="asset"、source_ref=file_key、asset_type=类型值
-- **验收**：上传环境交付清单.xlsx 解析后 environments 表自动新增行（含 hosts/variables 宽松解析）；上传 .docx 方案 chunks 入向量库（mock embedding+store）；失败/旧格式/重试全链路 30 用例覆盖
+- **验收**：上传环境交付清单.xlsx 解析后 environments 表自动新增行；上传 .docx 方案 chunks 入向量库（mock embedding+store）；失败/旧格式/重试全链路 30 用例覆盖；LangChain 管道 LCEL 链路跑通
 - **依赖**：D1 + D2 + A1 + A2 ✅
-- **工作量**：4-5 天
+- **工作量**：4-5 天（含 LangChain 重构）
 
-### D4 Embedding 调用层 ✅ 已完成（2026-09-16，随 D3 一并落地）
+### D4 Embedding 调用层 ✅ 已完成（2026-09-16，P3 Stage 1 重构为 LangChain Embeddings）
 - **新增文件**：`master/app/services/embedding_client.py`
 - **关键约束**：
-  - httpx.AsyncClient（ptp-dev 3.1）；单请求最多 64 段（EMBEDDING_BATCH_SIZE）；指数退避重试 3 次（EMBEDDING_MAX_RETRIES），耗尽抛 EmbeddingError → 资产 FAILED
+  - `get_embeddings()` 工厂返回 LangChain `Embeddings` 抽象：已配置 → `OpenAIEmbeddings`（OpenAI 兼容 /embeddings 协议）；未配置 → `FakeEmbeddings(size=embedding_dims)` 降级入库（NFR-01）
   - OpenAI 兼容 /embeddings 协议：EMBEDDING_BASE_URL 显式配置 > provider 默认值（zhipu→open.bigmodel.cn/api/paas/v4、dashscope→compatible-mode/v1）
-  - 返回按 index 排序保证顺序一致；段数不符直接报错
-- **验收**：mock 客户端验证批量切片一次调用成功、写入向量库可召回路径；真实 provider 联调待配置 API key（智谱 embedding-3 / 阿里 text-embedding-v3，1024 维）
+  - `EmbeddingClient` 保留为兼容层，内部委托 `get_embeddings()`，保留 batch_size 批量切片逻辑（LangChain OpenAIEmbeddings 自带指数退避重试）
+  - `point_id_for(asset_id, chunk_index)` 确定性 int64 算法（crc32），与 QdrantVectorStore / langchain_qdrant 共享
+- **验收**：mock 客户端验证批量切片一次调用成功、写入向量库可召回路径；未配置时 FakeEmbeddings 降级入库链路不中断
 - **依赖**：D2 ✅
 - **工作量**：2 天
 
@@ -230,28 +240,41 @@
 
 ## P3 阶段｜LLM 编排接入（主线，3-4 周）
 
-### L1 LLM 调用层 + 工具注册框架
+### L1 LLM 调用层 + 工具注册框架 ✅ 已完成（2026-09-20，Stage 1-2）
 - **新增文件**：
-  - `master/app/services/llm/client.py`（LLM 调用，httpx async）
-  - `master/app/services/llm/tools.py`（Function 工具定义）
-  - `master/app/services/llm/orchestrator.py`（多轮编排）
-- **修改文件**：`master/app/core/config.py` 加 `LLM_PROVIDER`/`LLM_API_KEY`/`LLM_MODEL`
-- **工具集**（每个工具对应一个 REST 接口的封装）：
+  - `master/app/services/llm/client.py`（LangChain ChatModel 工厂 + AnswerOutput 输出模型 + PydanticOutputParser + fallback）
+  - `master/app/services/llm/tools.py`（8 个 Function Calling 工具 + create_retriever_tool）
+  - `master/app/services/llm/orchestrator.py`（Retriever + Prompt + Chain 编排 + astream_qa_events）
+  - `master/app/services/llm/guardrail.py`（FR-08 指标校验 ±5% 容差）
+- **修改文件**：`master/app/core/config.py` 加 `LLM_PROVIDER`/`LLM_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL`/`LLM_TEMPERATURE`/`LLM_TIMEOUT` 及 RAG 调优参数（chunk_size/top_k/similarity_threshold/use_bm25/max_context_chars/metric_tolerance）
+- **工具集**（8 个：7 个静态 @tool + 1 个 RAG 检索工具）：
   - `query_environments(project_id, name?)`
   - `query_transactions(project_id, code?)`
   - `get_scenario(scenario_id)` / `create_scenario(...)`
   - `get_run_summary(run_no)` / `get_realtime_summary(run_no)`
-  - `search_knowledge(project_id, query, top_k)`（RAG 召回）
-- **关键约束**：禁止同步阻塞；超时 30s；失败回退到提示词
+  - `query_metrics(run_no, agg)`
+  - `search_knowledge(project_id, query, top_k)`（create_retriever_tool 包装 Qdrant Retriever）
+- **关键约束**：
+  - 基于 LangChain 抽象（ChatModel/Tool/Retriever/Prompt/OutputParser），业务层禁 import 具体 SDK
+  - 未配置 LLM → `FakeListChatModel` 兜底 JSON（NFR-01 降级）
+  - 超时 30s；工具后端未接线/异常包装为 error dict 不抛（保证 agent 编排鲁棒）
+  - Guardrail 指标校验：`|llm - actual| / actual > metric_tolerance(0.05)` 视为不一致
+- **验收**：LangChain agent 编排链路跑通；8 工具 args_schema 由类型注解自动生成；降级链路不中断
 - **工作量**：3-4 天
 
-### L2 对话式场景操作
+### L2 对话式场景操作 ✅ 已完成（2026-09-20，Stage 4）
 - **新增文件**：`master/app/api/v1/chat.py`、`master/app/ws/chat.py`（前端流式响应）
+- **新增端点**：
+  - `POST /api/v1/chat`：同步问答，返回 AnswerOut（answer/citations/sources/notes/confidence 五字段）
+  - `POST /api/v1/chat/stream`：SSE 流式问答（token/tool_call/error/done 事件）
+  - `WS /ws/chat`：对话 WebSocket（单连接多轮，事件流同 /chat/stream）
+- **门禁**：项目 viewer+ 才能对话；携带 run_no 时做执行可见性校验（不存在 → 4004，无权 → 3030）
+- **降级**：检索/LLM 基础设施异常时，同步接口 503 + 降级 JSON（4000）；流式接口以 error 事件 + done（兜底 AnswerOutput）收尾
 - **场景示例**：用户"把生产环境登录交易压到 500tps" → 工具链 query_environments → query_transactions → create_scenario → create_run
 - **依赖**：L1 + A1 + A2 + A3
 - **工作量**：3 天
 
-### L3 监控采集分析归因
+### L3 监控采集分析归因 ✅ 已完成（2026-09-20，query_metrics 工具随 L1 落地）
 - **修改文件**：扩展 L1 工具集，加：
   - `query_metrics(run_no, agg)` → 复用 `master/app/metrics.py` 已埋点
   - `get_slow_queries(window)`
@@ -260,13 +283,14 @@
 - **依赖**：L1 + D2 + 现有 metrics 埋点
 - **工作量**：3 天
 
-### L4 测试报告自动生成
-- **新增文件**：`master/app/services/report_generator.py`
+### L4 测试报告自动生成 ✅ 已完成（2026-09-20，Stage 5）
+- **新增文件**：`master/app/services/llm/report_generator.py`
 - **流程**：
-  1. Function Calling 拉 run summary + metrics 聚合 + MinIO JTL/HTML 抽取关键统计
-  2. LLM 生成 Markdown 报告
+  1. Function Calling 拉 run summary + ES metrics 聚合 + MinIO JTL/HTML 抽取关键统计
+  2. LLM 生成 Markdown 报告（降级时用模板生成，confidence=0.5，notes 标注降级原因）
   3. 写回 MinIO `reports/{run_no}/llm-report.md`
   4. 切 chunk + embedding → Qdrant（source_type=report，供下次相似报告召回）
+- **三级容错**：LLM 不可用 → 模板生成；LLM 报错 → fallback payload（HTTP 200）；ES 报错 → 报告标注"数据不可用"；MinIO 报错 → notes 标注不阻断 API
 - **依赖**：L1 + D2 + D4
 - **工作量**：3-4 天
 
@@ -330,3 +354,6 @@
 - 所有新配置项走 `master/app/core/config.py` + `.env.example`
 - 禁止硬编码 LLM/Embedding API key（ptp-dev 3.3）
 - 向量库相关配置统一走 `VECTOR_PROVIDER`/`QDRANT_URL`/`EMBEDDING_DIMS` 等环境变量；业务层禁止 import 具体 SDK，只依赖 `VectorStore` 协议（D2 抽象层约定）
+- RAG/LLM 配置：`CHUNK_SIZE`/`CHUNK_OVERLAP`/`TOP_K`/`SIMILARITY_THRESHOLD`/`USE_BM25`/`MAX_CONTEXT_CHARS`/`METRIC_TOLERANCE`/`LLM_*`/`EMBEDDING_*` 全部走环境变量
+- **LangChain 抽象层约定（SRS 1.5.3）**：RAG 全链路（Loader/Splitter/Embeddings/VectorStore/Retriever/Prompt/Tool/ChatModel/OutputParser）基于 LangChain 抽象；业务层禁止 import 具体 SDK（qdrant-client / openai 等），只依赖 LangChain 接口 + 本项目 Protocol
+- **NFR-01 降级约定**：未配置 Embedding → `FakeEmbeddings` 入库（indexed=true, degraded=true）；未配置 LLM → `FakeListChatModel` 兜底 JSON；降级链路不中断，仅在 notes/confidence 标注

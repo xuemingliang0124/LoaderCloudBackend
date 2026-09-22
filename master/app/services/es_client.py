@@ -346,6 +346,46 @@ async def query_realtime_summary(run_no: str) -> dict:
     }
 
 
+def _normalize_run_metrics(raw: dict, samples: int, source: str) -> dict:
+    """把 pt-summary.summary / 实时聚合结构归一化为 FR-08 基准指标。
+
+    返回 {tps, p95_ms, error_rate, samples, source}：
+    - tps ← avg_tps；p95_ms ← p95_rt（ms）
+    - error_rate 为百分比（0-100，errors/samples*100），与 LLM 回答中
+      "错误率 0.5%" 的百分数口径一致；guardrail 对无百分号小数按比率换算
+    """
+    errors = int(raw.get("errors") or 0)
+    return {
+        "tps": round(float(raw.get("avg_tps") or 0.0), 2),
+        "p95_ms": round(float(raw.get("p95_rt") or 0.0), 2),
+        "error_rate": round(errors / samples * 100, 4) if samples else 0.0,
+        "samples": samples,
+        "source": source,
+    }
+
+
+async def get_run_metrics(run_no: str) -> dict | None:
+    """FR-08 指标校验基准：返回标准化 {tps,p95_ms,error_rate,samples,source}。
+
+    优先终态 pt-summary（run 已收官）；终态缺失时兜底 pt-metrics 实时聚合
+    （进行中 run 也可校验）；两者均无样本数据（run_no 不存在/ES 丢数）返回
+    None，由 guardrail 跳过校验并在 notes 标注"无法获取基准指标"（SRS FR-08
+    异常处理 + 风险表"指标校验无基准数据 → 跳过校验"）。
+    """
+    summary_doc = await query_summary(run_no)
+    if summary_doc is not None:
+        summary = summary_doc.get("summary") or {}
+        samples = int(summary.get("samples") or 0)
+        if samples > 0:
+            return _normalize_run_metrics(summary, samples, "summary")
+
+    realtime = await query_realtime_summary(run_no)
+    samples = int(realtime.get("samples") or 0)
+    if samples > 0:
+        return _normalize_run_metrics(realtime, samples, "realtime")
+    return None
+
+
 def _avg_tps_from_window(
     samples: int, first_ts: float | None, last_ts: float | None
 ) -> float:
