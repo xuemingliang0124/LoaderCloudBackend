@@ -15,11 +15,15 @@ from app.core.security import decode_token_payload
 from app.db.session import SessionLocal
 from app.services import agent_registry
 from app.services.exceptions import BusinessError
+from app.ws.chat import router as chat_router
 from app.ws.hub import frontend_hub
 from app.ws.manager import agent_manager
 from app.ws.protocol import FE_MSG_SUBSCRIBED, Envelope
 
 router = APIRouter()
+# LLM 对话通道（/ws/chat）独立成模块，仅在此挂载：与 agent/前端运行
+# 通道解耦，连接台账由 ws.chat.chat_manager 自持（FR-10 实施方案风险表）
+router.include_router(chat_router)
 
 
 @router.websocket("/ws/agent")

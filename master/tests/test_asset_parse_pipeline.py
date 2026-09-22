@@ -1,10 +1,17 @@
-"""文档解析管道集成测试（D3 + D4）：上传 → 解析 → 结构化抽取/向量入库 → 状态机/重试。
+"""文档解析管道集成测试（D3 + D4 + P3 Stage 1 重构）：上传 → 解析 → 结构化抽取/向量入库 → 状态机/重试。
+
+P3 Stage 1 重构变更：
+- mock 路径从 asset_parser.EmbeddingClient 改为 langchain_pipeline.get_embeddings
+  + langchain_pipeline.get_vector_store（asset_parser 文本路径委托 langchain_pipeline）
+- chunk 数精确断言改区间（RecursiveCharacterTextSplitter 边界与原 chunk_text 略有差异）
+- NFR-01 降级：未配置 Embedding 时 FakeEmbeddings 入库（indexed=true, degraded=true），
+  不再跳过入库（indexed=false 已废弃）
 
 策略：
 - MinIO upload_bytes/get_object_bytes 用 monkeypatch 替换（与 test_assets.py 口径一致）
 - run_asset_parse 直接以 db_env（内存库会话工厂）为 session_factory 同步驱动，
   绕过 APScheduler（调度器未启动时 enqueue 仅告警）
-- Embedding/VectorStore 通过替换 asset_parser 命名空间内的类与工厂实现可控注入
+- Embeddings/VectorStore 通过替换 langchain_pipeline 命名空间内的调用实现可控注入
 - get_settings 在 asset_parser 命名空间内打桩，隔离本机 .env 的 Embedding 配置
 - 断言一律用 db_env 新开会话，规避 db_session 身份映射读到旧对象（异步会话陷阱②）
 """
@@ -20,7 +27,6 @@ from app.models.environment import Environment
 from app.models.script import Script
 from app.models.transaction import Transaction
 from app.services.asset_parser import run_asset_parse
-from app.services.embedding_client import EmbeddingError
 
 
 def _auth(username: str, role: str = "user") -> dict:
@@ -116,6 +122,9 @@ def _make_settings(**overrides) -> SimpleNamespace:
         embedding_timeout=5,
         embedding_max_retries=1,
         embedding_dims=4,
+        # P3 Stage 1：langchain_pipeline.build_chunker 消费
+        chunk_size=500,
+        chunk_overlap=50,
         timezone="Asia/Shanghai",
     )
     values.update(overrides)
@@ -130,11 +139,30 @@ class FakeStore:
         self.upserted.extend(points)
 
 
+class FakeEmbeddings:
+    """模拟 LangChain Embeddings（aembed_documents 返回固定 4 维向量）。"""
+
+    async def aembed_documents(self, texts):
+        return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    async def aembed_query(self, text):
+        return [0.1, 0.2, 0.3, 0.4]
+
+
 @pytest.fixture
 def fake_vector_store(monkeypatch) -> FakeStore:
+    """P3 Stage 1：mock 路径改为 langchain_pipeline.get_vector_store。"""
     store = FakeStore()
-    monkeypatch.setattr("app.services.asset_parser.get_vector_store", lambda: store)
+    monkeypatch.setattr("app.services.langchain_pipeline.get_vector_store", lambda: store)
     return store
+
+
+@pytest.fixture
+def fake_embeddings(monkeypatch) -> FakeEmbeddings:
+    """P3 Stage 1：mock langchain_pipeline.get_embeddings 返回 FakeEmbeddings。"""
+    embeddings = FakeEmbeddings()
+    monkeypatch.setattr("app.services.langchain_pipeline.get_embeddings", lambda: embeddings)
+    return embeddings
 
 
 # ---------- 环境清单结构化抽取 ----------
@@ -283,22 +311,18 @@ async def test_txn_inventory_creates_transactions_with_script_link(
 
 
 async def test_docx_plan_doc_chunks_indexed(
-    client, db_env, monkeypatch, fake_vector_store
+    client, db_env, monkeypatch, fake_vector_store, fake_embeddings
 ):
+    """P3 Stage 1：mock 路径改为 langchain_pipeline.get_embeddings/get_vector_store。"""
     _patch_storage(monkeypatch)
-
-    class FakeEmbeddingClient:
-        def __init__(self, *args, **kwargs) -> None: ...
-
-        async def embed(self, texts):
-            return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
-
+    # get_embeddings/get_vector_store 已由 fixture mock；get_settings 仍需打桩
+    # （控制 degraded 判定：未配 api_key → degraded=true）
     monkeypatch.setattr(
-        "app.services.asset_parser.get_settings",
-        lambda: _make_settings(embedding_api_key="k", embedding_model="m"),
+        "app.services.langchain_pipeline.get_settings",
+        lambda: _make_settings(embedding_dims=4),
     )
     monkeypatch.setattr(
-        "app.services.asset_parser.EmbeddingClient", FakeEmbeddingClient
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
     )
     pid = await _create_project(client, "方案项目")
     data = _docx([f"性能测试方案第{i}节：" + "说明内容" * 15 for i in range(12)])
@@ -311,7 +335,8 @@ async def test_docx_plan_doc_chunks_indexed(
         ).scalar_one()
         assert row.status == "ready"
         assert row.parse_meta["indexed"] is True
-        assert row.parse_meta["chunks"] > 1
+        # 12 段每段约 150 字，总 ~1800 字，chunk_size=500 → 3-5 块（区间断言）
+        assert 2 <= row.parse_meta["chunks"] <= 8
 
     assert len(fake_vector_store.upserted) == row.parse_meta["chunks"]
     first = fake_vector_store.upserted[0]
@@ -324,9 +349,15 @@ async def test_docx_plan_doc_chunks_indexed(
 
 
 async def test_docx_without_embedding_config_degrades(
-    client, db_env, monkeypatch, fake_vector_store
+    client, db_env, monkeypatch, fake_vector_store, fake_embeddings
 ):
+    """NFR-01 降级（P3 Stage 1 重构）：未配置 → FakeEmbeddings 入库，indexed=true degraded=true。"""
     _patch_storage(monkeypatch)
+    # 未配置 embedding_api_key/embedding_model → degraded=true
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_settings",
+        lambda: _make_settings(embedding_dims=4),
+    )
     monkeypatch.setattr(
         "app.services.asset_parser.get_settings", lambda: _make_settings()
     )
@@ -341,28 +372,38 @@ async def test_docx_without_embedding_config_degrades(
         ).scalar_one()
         assert row.status == "ready"  # 结构化/解析不受影响
         assert row.parse_meta["chunks"] > 0
-        assert row.parse_meta["indexed"] is False
-        assert any("Embedding 未配置" in w for w in row.parse_meta["warnings"])
-    assert fake_vector_store.upserted == []
+        assert row.parse_meta["indexed"] is True  # FakeEmbeddings 入库（不再跳过）
+        assert row.parse_meta["degraded"] is True  # 降级标记
+    # 向量库有数据（FakeEmbeddings 入库，不再为空）
+    assert len(fake_vector_store.upserted) == row.parse_meta["chunks"]
 
 
 async def test_embedding_failure_marks_failed(
     client, db_env, monkeypatch, fake_vector_store
 ):
+    """已配置但调用失败 → 抛异常 → asset_parser 标记 FAILED。"""
+
+    class FailingEmbeddings:
+        async def aembed_documents(self, texts):
+            raise RuntimeError("上游 503")
+
+        async def aembed_query(self, text):
+            raise RuntimeError("上游 503")
+
     _patch_storage(monkeypatch)
-
-    class FailingEmbeddingClient:
-        def __init__(self, *args, **kwargs) -> None: ...
-
-        async def embed(self, texts):
-            raise EmbeddingError("上游 503")
-
+    # get_settings 配置为已配置（embedding_api_key/model 非空）→ 走真实 OpenAIEmbeddings 路径
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_settings",
+        lambda: _make_settings(
+            embedding_api_key="k", embedding_model="m", embedding_dims=4
+        ),
+    )
     monkeypatch.setattr(
         "app.services.asset_parser.get_settings",
         lambda: _make_settings(embedding_api_key="k", embedding_model="m"),
     )
     monkeypatch.setattr(
-        "app.services.asset_parser.EmbeddingClient", FailingEmbeddingClient
+        "app.services.langchain_pipeline.get_embeddings", lambda: FailingEmbeddings()
     )
     pid = await _create_project(client, "失败项目")
     data = _docx(["报告内容" * 50])
@@ -483,6 +524,15 @@ async def test_retry_parse_flow(client, db_env, monkeypatch):
     monkeypatch.setattr(
         "app.services.asset_parser.get_settings", lambda: _make_settings()
     )
+    # P3 Stage 1：mock langchain_pipeline 避免 run_asset_parse 连真实 Qdrant
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_settings", lambda: _make_settings()
+    )
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_embeddings", lambda: FakeEmbeddings()
+    )
+    store = FakeStore()
+    monkeypatch.setattr("app.services.langchain_pipeline.get_vector_store", lambda: store)
     scheduled: list[int] = []
     monkeypatch.setattr(
         "app.api.v1.assets.schedule_asset_parse",

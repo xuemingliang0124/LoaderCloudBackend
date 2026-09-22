@@ -56,6 +56,59 @@ es_write_errors = Counter(
 )
 
 
+# ---------- P3 LLM 埋点（NFR-03：复用已有 Prometheus 埋点） ----------
+# 4 个 LLM 指标，对齐 SRS 8.1 KPI 评测维度：
+
+llm_call_duration = Histogram(
+    "ptp_llm_call_duration_seconds",
+    "LLM 调用耗时（秒）",
+    labelnames=["endpoint"],  # chat / chat_stream / ws_chat / report
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30),
+)
+
+llm_calls_total = Counter(
+    "ptp_llm_calls_total",
+    "LLM 调用总数",
+    labelnames=["endpoint", "status"],  # status: success / degraded / fallback
+)
+
+llm_retrieval_score = Histogram(
+    "ptp_llm_retrieval_score",
+    "RAG 检索 Top-k 相似度分（0-1）",
+    labelnames=["project_id"],
+    buckets=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+)
+
+llm_guardrail_result = Counter(
+    "ptp_llm_guardrail_result_total",
+    "FR-08 指标校验结果计数",
+    labelnames=["result"],  # matched / mismatched / skipped / na
+)
+
+
+def record_llm_call(endpoint: str, duration: float, status: str = "success") -> None:
+    """LLM 调用埋点（chat/ws/report 路径调用）。
+
+    endpoint: chat / chat_stream / ws_chat / report
+    status: success（正常 LLM）/ degraded（降级响应）/ fallback（兜底模板）
+    """
+    llm_call_duration.labels(endpoint=endpoint).observe(duration)
+    llm_calls_total.labels(endpoint=endpoint, status=status).inc()
+
+
+def record_llm_retrieval(project_id: int, score: float) -> None:
+    """检索 Top-k 命中埋点（knowledge-search / RAG 上下文检索调用）。"""
+    llm_retrieval_score.labels(project_id=str(project_id)).observe(score)
+
+
+def record_llm_guardrail(result: str) -> None:
+    """指标校验结果埋点（guardrail 调用）。
+
+    result: matched（一致）/ mismatched（超差）/ skipped（无基准跳过）/ na
+    """
+    llm_guardrail_result.labels(result=result).inc()
+
+
 # 复用对象，避免每次请求重新构造
 _STATUS_RE = re.compile(r"Checkedout:\s*(\d+).*Checkedin:\s*(\d+).*Pool size:\s*(\d+)")
 

@@ -1,9 +1,14 @@
-"""文档解析管道（D3，roadmap 核心）：上传资产 → 解析 → 双路输出。
+"""文档解析管道（D3 + P3 Stage 1 重构）：上传资产 → 解析 → 双路输出。
 
 双路输出：
-- (a) 文本切片（300-500 字/段，overlap 50 字）→ embedding（D4）→ Qdrant
-  （经 VectorStore 协议 upsert_chunks，业务层禁止 import Qdrant SDK）
+- (a) 文本切片（langchain_pipeline：Cleaner + RecursiveCharacterTextSplitter）
+  → LangChain Embeddings → Qdrant
 - (b) 表格行 → 列映射规则（下方常量）→ test_environment / test_transaction 表
+
+P3 Stage 1 重构（SRS 1.5.3 FR-01~04）：
+- 文本路径走 LangChain 抽象（langchain_loader.iter_documents_from_parsed →
+  langchain_pipeline.index_chunks：Cleaner + Chunker + Embeddings + VectorStore）
+- 结构化抽取逻辑全部保留（列映射/宽松取值/去重/ORM 构造/状态机 CAS）
 
 关键设计（ptp-dev 3.1 强约束）：
 - 全部 CPU 密集解析用 asyncio.to_thread 包裹，禁止事件循环内阻塞
@@ -13,11 +18,13 @@
 - 上传后由 APScheduler 延迟投递（scheduler.enqueue_date_job），不阻塞上传响应
 - 状态迁移全部用 Core update() 语句（避免异步会话身份映射/懒加载陷阱，
   见 project_memory 异步会话陷阱三连）
-- 未配置 Embedding 时降级：结构化抽取照常，仅跳过向量入库（parse_meta.indexed=false）
+- NFR-01 降级（SRS 1.5.4）：未配置 Embedding 时 FakeEmbeddings 入库
+  （parse_meta.indexed=true, degraded=true），结构化抽取照常运行
 
 parse_meta 结构（AssetOut 透出，D5 列映射修正接口消费）：
-{"chunks": 切片数, "indexed": 是否入向量库, "environments": 抽取环境行数,
- "transactions": 抽取交易行数, "warnings": [跳过原因], "unmatched_columns": [未匹配表头],
+{"chunks": 切片数, "indexed": 是否入向量库, "degraded": 是否降级(FakeEmbeddings),
+ "environments": 抽取环境行数, "transactions": 抽取交易行数,
+ "warnings": [跳过原因], "unmatched_columns": [未匹配表头],
  "error": 失败原因（仅 FAILED）}
 """
 
@@ -41,12 +48,8 @@ from app.models.environment import Environment
 from app.models.script import Script
 from app.models.transaction import Transaction
 from app.services import storage
-from app.services.embedding_client import EmbeddingClient, point_id_for
-from app.services.vector_store import ChunkDoc, get_vector_store
-
-# 文本切片参数（roadmap D3：300-500 字/段，overlap 50 字）
-CHUNK_TARGET_SIZE = 500
-CHUNK_OVERLAP = 50
+from app.services.langchain_loader import iter_documents_from_parsed
+from app.services.langchain_pipeline import index_chunks
 
 # 结构化抽取的资产类型 → 列映射表（D5 remap 前的硬编码兜底）
 # 键为归一化表头（小写、去空格）；命中列才进入抽取，未命中的记入 unmatched_columns
@@ -205,51 +208,6 @@ def dispatch_parse(ext: str, data: bytes) -> ParsedDoc:
             "暂不支持 .pptx 格式，请将文件导出为 .pdf 后重新上传"
         )
     raise UnsupportedFormatError(f"不支持的文件扩展名: {ext}")
-
-
-# ---------- 文本切片 ----------
-
-
-def chunk_text(
-    paragraphs: list[str],
-    target_size: int = CHUNK_TARGET_SIZE,
-    overlap: int = CHUNK_OVERLAP,
-) -> list[str]:
-    """段落贪心聚合切片：单段 ≤ target；聚合超限时开新块并携带前块尾部 overlap。
-
-    - 超长段落硬切（滑窗步长 target-overlap）
-    - 相邻块 overlap：取前块末尾 ≤overlap 字符拼到新块头部（保证语义连续）
-    """
-    chunks: list[str] = []
-    buffer = ""
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
-            continue
-        # 超长段落硬切
-        while len(para) > target_size:
-            if buffer:
-                chunks.append(buffer)
-                buffer = ""
-            chunks.append(para[:target_size])
-            para = para[target_size - overlap :]
-        if not para:
-            continue
-        if not buffer:
-            buffer = para
-        elif len(buffer) + 1 + len(para) <= target_size:
-            buffer = f"{buffer}\n{para}"
-        else:
-            # 开新块：携带前块尾部（不超过剩余空间，保证新块 ≤ target）
-            tail_limit = target_size - len(para) - 1
-            tail = buffer[-overlap:] if tail_limit >= overlap else ""
-            if tail:
-                tail = tail.lstrip()
-            chunks.append(buffer)
-            buffer = f"{tail}\n{para}" if tail else para
-    if buffer:
-        chunks.append(buffer)
-    return [c for c in (chunk.strip() for chunk in chunks) if c]
 
 
 # ---------- 列映射与结构化抽取 ----------
@@ -443,16 +401,6 @@ def _dedupe_rows(
     return kept
 
 
-def _table_text_paragraphs(tables: list[list[list[str]]]) -> list[str]:
-    """表格 → 伪段落文本（供非清单类文档的表格内容进向量库）。"""
-    paragraphs = []
-    for table in tables:
-        lines = [" | ".join(cells) for cells in table if cells]
-        if lines:
-            paragraphs.append("\n".join(lines))
-    return paragraphs
-
-
 # ---------- 解析入口与状态机 ----------
 
 
@@ -510,6 +458,7 @@ async def _parse_asset(db: AsyncSession, asset_id: int) -> None:
     meta: dict[str, Any] = {
         "chunks": 0,
         "indexed": False,
+        "degraded": False,
         "environments": 0,
         "transactions": 0,
         "warnings": [],
@@ -527,14 +476,21 @@ async def _parse_asset(db: AsyncSession, asset_id: int) -> None:
         if column_map is not None:
             await _extract_structured(db, asset, parsed, column_map, meta)
 
-        # 路径 (a)：文本切片 → embedding → 向量库（清单类资产表格已结构化，不再入向量）
-        paragraphs = list(parsed.paragraphs)
-        if column_map is None:
-            paragraphs.extend(_table_text_paragraphs(parsed.tables))
-        if paragraphs:
-            chunks = chunk_text(paragraphs)
-            meta["chunks"] = len(chunks)
-            await _index_chunks(asset, chunks, meta)
+        # 路径 (a)：文本 → LangChain Loader → Cleaner → Chunker → Embeddings → 向量库
+        #   清单类资产表格已结构化，不再入向量（include_tables=False）
+        #   非清单类资产 paragraphs + tables 都入向量（include_tables=True）
+        include_tables = column_map is None
+        documents = list(
+            iter_documents_from_parsed(
+                parsed,
+                include_tables=include_tables,
+                asset_type=asset.asset_type,
+                source_ref=asset.file_key,
+            )
+        )
+        if documents:
+            chunk_texts = await index_chunks(documents, asset, meta)
+            meta["chunks"] = len(chunk_texts)
         elif column_map is None:
             meta["warnings"].append("文档未提取到有效文本内容")
 
@@ -546,7 +502,8 @@ async def _parse_asset(db: AsyncSession, asset_id: int) -> None:
         await db.commit()
         logger.info(
             f"资产 {asset_id} 解析完成: status=ready chunks={meta['chunks']} "
-            f"indexed={meta['indexed']} environments={meta['environments']} "
+            f"indexed={meta['indexed']} degraded={meta.get('degraded', False)} "
+            f"environments={meta['environments']} "
             f"transactions={meta['transactions']}"
         )
     except Exception as exc:  # noqa: BLE001
@@ -637,37 +594,6 @@ async def _extract_structured(
     meta["warnings"].extend(warnings)
     # 截断告警列表，防止超大清单把 parse_meta 撑爆
     del meta["warnings"][50:]
-
-
-async def _index_chunks(asset: Asset, chunks: list[str], meta: dict[str, Any]) -> None:
-    """切片向量化并写入向量库。
-
-    - 未配置 Embedding：降级跳过（indexed=false），结构化抽取不受影响
-    - 已配置但调用失败：抛出 → 上层标记 FAILED（含重试耗尽信息）
-    """
-    settings = get_settings()
-    if not (settings.embedding_api_key and settings.embedding_model):
-        meta["warnings"].append("Embedding 未配置，文本切片未入向量库")
-        return
-    client = EmbeddingClient()
-    vectors = await client.embed(chunks)
-    store = get_vector_store()
-    docs = [
-        ChunkDoc(
-            point_id=point_id_for(asset.id, index),
-            asset_id=asset.id,
-            project_id=asset.project_id,
-            chunk_index=index,
-            text_chunk=text,
-            embedding=vector,
-            asset_type=asset.asset_type,
-            source_type="asset",
-            source_ref=asset.file_key,
-        )
-        for index, (text, vector) in enumerate(zip(chunks, vectors, strict=True))
-    ]
-    await store.upsert_chunks(docs)
-    meta["indexed"] = True
 
 
 def schedule_asset_parse(asset_id: int, delay_seconds: float = 2.0) -> None:

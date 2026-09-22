@@ -15,6 +15,20 @@ qdrant-client>=1.11
 python-docx>=1.1
 openpyxl>=3.1
 pdfplumber>=0.11
+# LangChain 全家桶（P3 引入，SRS 1.5.3 强约束：RAG 全链路基于 LangChain 抽象实现）
+# 锁 1.x 主版本避免接口漂移（create_tool_calling_executor / create_retriever_tool 签名稳定）
+langchain>=1.0,<2.0
+langchain-core>=1.0
+langchain-community>=0.4
+langchain-openai>=1.0
+langchain-qdrant>=1.0
+langchain-text-splitters>=1.0
+# EnsembleRetriever（BM25 混检）在 langchain 1.x 迁移至 langchain-classic
+langchain-classic>=1.0
+# pdf 文本加载器依赖（langchain_community.PyPDFLoader）
+pypdf>=4.0
+# BM25 混检（USE_BM25=true 时启用 EnsembleRetriever，默认关闭）
+rank-bm25>=0.2
 python-jose[cryptography]>=3.3
 bcrypt>=4.0
 python-multipart>=0.0.9

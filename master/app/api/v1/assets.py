@@ -13,19 +13,28 @@
 import hashlib
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import CurrentUser, ensure_project_access, get_current_user
+from app.core.config import ERR_VECTOR_STORE_UNAVAILABLE
 from app.db.session import get_db
 from app.models.asset import Asset
 from app.models.enums import AssetStatus, AssetType
-from app.schemas import AssetOut, AssetUpdateIn
+from app.schemas import (
+    AssetOut,
+    AssetUpdateIn,
+    KnowledgeSearchItemOut,
+    KnowledgeSearchOut,
+)
 from app.schemas.common import like_pattern, ok
 from app.services import storage
 from app.services.asset_parser import schedule_asset_parse
 from app.services.exceptions import BusinessError
+from app.services.llm.client import format_citation
+from app.services.llm.orchestrator import search_knowledge
 
 router = APIRouter()
 
@@ -256,8 +265,6 @@ async def delete_asset(
         try:
             await storage.delete_object(object_key)
         except Exception as exc:  # noqa: BLE001
-            from loguru import logger
-
             logger.warning(f"资产 {asset_id} MinIO 对象删除失败 ({object_key}): {exc}")
 
     return ok({"id": asset_id, "project_id": project_id, "deleted": True})
@@ -287,3 +294,46 @@ async def retry_asset_parse(
     await db.commit()
     schedule_asset_parse(asset.id)
     return ok({"id": asset.id, "status": asset.status, "queued": True})
+
+
+@router.get("/assets/knowledge-search")
+async def knowledge_search(
+    project_id: int = Query(..., ge=1),
+    q: str = Query(..., min_length=1, max_length=2000, description="检索词"),
+    top_k: int = Query(5, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """RAG 知识检索（viewer+，FR-05/FR-10）：返回 ≤top_k 命中切片与相似度分。
+
+    非项目嵌套路径（SRS 6.1：GET /api/v1/assets/knowledge-search），project_id
+    走 query 参数并强制成员门禁；检索词纯空白 → 422；向量库不可用 → 4003。
+    """
+    await ensure_project_access(db, project_id, user, "viewer")
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="检索词不能为纯空白")
+
+    try:
+        pairs = await search_knowledge(project_id, query, top_k=top_k)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"知识检索失败（向量库不可用）: {type(exc).__name__}: {exc}")
+        raise BusinessError(
+            "向量库不可用，知识检索失败", code=ERR_VECTOR_STORE_UNAVAILABLE
+        )
+
+    items: list[KnowledgeSearchItemOut] = []
+    for doc, score in pairs:
+        meta = doc.metadata or {}
+        items.append(
+            KnowledgeSearchItemOut(
+                citation=format_citation(doc),
+                content=doc.page_content,
+                score=round(float(score), 4),
+                asset_id=meta.get("asset_id"),
+                asset_type=meta.get("asset_type") or "unknown",
+                chunk_index=int(meta.get("chunk_index") or 0),
+            )
+        )
+    result = KnowledgeSearchOut(total=len(items), items=items)
+    return ok(result.model_dump())

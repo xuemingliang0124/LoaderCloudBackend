@@ -1,4 +1,9 @@
-"""文档解析管道单元测试（D3）：切片 / 列映射 / 宽松取值 / 三种格式解析。
+"""文档解析管道单元测试（D3 + P3 Stage 1 重构）：列映射 / 宽松取值 / 三种格式解析。
+
+P3 Stage 1 重构变更：
+- chunk_text 相关测试移除（改用 langchain_pipeline.RecursiveCharacterTextSplitter，
+  对应测试见 test_langchain_pipeline.py）
+- 解析/列映射/宽松取值/分发 等纯函数测试保留不变
 
 纯函数级测试，不依赖 DB / MinIO / 向量库；docx/xlsx 用库本身反向构造测试文件，
 pdf 用手工构造的最小合法 PDF（含 xref 偏移计算）。
@@ -9,12 +14,9 @@ import io
 import pytest
 
 from app.services.asset_parser import (
-    CHUNK_OVERLAP,
-    CHUNK_TARGET_SIZE,
     ENV_INVENTORY_COLUMN_MAP,
     TXN_INVENTORY_COLUMN_MAP,
     UnsupportedFormatError,
-    chunk_text,
     dispatch_parse,
     extract_inventory_rows,
     match_column,
@@ -26,53 +28,6 @@ from app.services.asset_parser import (
     _split_list_value,
 )
 from app.services.embedding_client import point_id_for
-
-# ---------- 文本切片 ----------
-
-
-def test_chunk_text_empty_and_short() -> None:
-    assert chunk_text([]) == []
-    assert chunk_text(["", "   "]) == []
-    short = chunk_text(["短段落"])
-    assert short == ["短段落"]
-
-
-def test_chunk_text_accumulates_paragraphs_within_target() -> None:
-    paras = [f"第{i}段" + "内容" * 20 for i in range(20)]  # 每段约 44 字，总 880 字
-    chunks = chunk_text(paras)
-    assert len(chunks) > 1
-    for chunk in chunks:
-        assert len(chunk) <= CHUNK_TARGET_SIZE
-    # 聚合语义：非首块的前缀应来自前块尾部（overlap）
-    for prev, nxt in zip(chunks, chunks[1:], strict=False):
-        if len(prev) >= CHUNK_OVERLAP:
-            tail = prev[-CHUNK_OVERLAP:].lstrip()
-            assert nxt.startswith(tail)
-
-
-def test_chunk_text_hard_splits_long_paragraph() -> None:
-    long_para = "压" * 1200
-    chunks = chunk_text([long_para])
-    assert len(chunks) == 3  # 500 + 450 + 250（步长 450）
-    assert all(len(c) <= CHUNK_TARGET_SIZE for c in chunks)
-    assert chunks[0] == "压" * 500
-    # 滑窗 overlap：相邻块首尾相接处重复 50 字
-    assert chunks[1].startswith("压" * CHUNK_OVERLAP)
-    assert (
-        "".join(chunks[0][:500] + chunks[1][CHUNK_OVERLAP:] + chunks[2][CHUNK_OVERLAP:])
-        == long_para
-    )
-
-
-def test_chunk_text_mixed_long_and_short() -> None:
-    paras = ["x" * 600, "短", "y" * 100]
-    chunks = chunk_text(paras)
-    assert all(len(c) <= CHUNK_TARGET_SIZE for c in chunks)
-    # 首块为硬切前 500 字；overlap 会让内容重复，总量 ≥ 原文即可
-    assert chunks[0] == "x" * 500
-    assert "".join(chunks).count("x") >= 600
-    assert chunks[-1].endswith("y" * 100)
-
 
 # ---------- 列映射 ----------
 

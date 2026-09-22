@@ -699,3 +699,98 @@ class AssetOut(BaseModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+
+
+# ---------- P3 LLM 对话 / 知识检索（FR-09/FR-10，SRS 6.1） ----------
+
+
+class ChatRequestIn(BaseModel):
+    """POST /chat 与 /chat/stream 请求体（SRS 6.1）。
+
+    run_no 可选：携带时对回答做 FR-08 ±5% 指标校验（不存在返回 4004）。
+    非法问题（空串/超长）由约束直接 422（SRS NFR-02）。
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "project_id": 1,
+                "message": "把生产环境登录交易压到 500 TPS",
+                "use_tools": True,
+                "top_k": 5,
+            }
+        }
+    )
+
+    project_id: int = Field(..., ge=1)
+    message: str = Field(..., min_length=1, max_length=2000)
+    use_tools: bool = True
+    top_k: int | None = Field(default=None, ge=1, le=20)
+    run_no: str | None = Field(default=None, max_length=64)
+
+    @field_validator("message")
+    @classmethod
+    def _strip_and_require_message(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("问题内容不能为空")
+        return v
+
+    @field_validator("run_no")
+    @classmethod
+    def _strip_run_no(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class AnswerOut(BaseModel):
+    """FR-09 统一输出（所有 LLM 接口 data 字段均为本结构五字段）。"""
+
+    answer: str
+    citations: list[str] = Field(default_factory=list)
+    used_metrics: list[str] | None = None
+    confidence: float = 0.5
+    notes: str = ""
+
+
+class KnowledgeSearchItemOut(BaseModel):
+    """知识检索单条命中（含相似度分，TC-RET-001 验收点）。"""
+
+    citation: str
+    content: str
+    score: float
+    asset_id: int | None = None
+    asset_type: str = "unknown"
+    chunk_index: int = 0
+
+
+class KnowledgeSearchOut(BaseModel):
+    """GET /assets/knowledge-search 响应。"""
+
+    total: int
+    items: list[KnowledgeSearchItemOut] = Field(default_factory=list)
+
+
+class ReportGenerateIn(BaseModel):
+    """POST /reports/generate 请求体（SRS 6.1）。"""
+
+    run_no: str = Field(..., min_length=1, max_length=64)
+
+    @field_validator("run_no")
+    @classmethod
+    def _strip_run_no(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("run_no 不能为空")
+        return v
+
+
+class ReportGenerateOut(BaseModel):
+    """POST /reports/generate 响应（SRS 6.1）。"""
+
+    run_no: str
+    report_key: str
+    confidence: float = 0.5
+    notes: str = ""

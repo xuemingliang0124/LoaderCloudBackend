@@ -6,6 +6,7 @@ from app.api.v1 import (
     agents,
     assets,
     auth,
+    chat,
     environments,
     health,
     members,
@@ -36,3 +37,4 @@ api_router.include_router(scenarios.router, tags=["scenarios"])
 api_router.include_router(runs.router, tags=["runs"])
 api_router.include_router(schedules.router, tags=["schedules"])
 api_router.include_router(metrics.router, tags=["metrics"])
+api_router.include_router(chat.router, tags=["llm-chat"])
