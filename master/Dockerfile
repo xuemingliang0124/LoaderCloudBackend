@@ -14,6 +14,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+# tests + pytest.ini 打入镜像：CI 接口测试直接复用本镜像，保证测试代码与
+# app 代码同版本（无需挂载 tests，不会因下游重新检出代码导致版本漂移）
+COPY tests ./tests
+COPY pytest.ini .
 COPY alembic ./alembic
 COPY alembic.ini .
 COPY entrypoint.sh /entrypoint.sh
