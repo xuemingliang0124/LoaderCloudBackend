@@ -200,14 +200,14 @@ async def precheck_transaction_delete(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """删除前预检（viewer+）：返回引用该交易的场景/方案数。
+    """删除前预检（viewer+）：返回引用该交易的场景数。
 
-    A3/A4 场景或测试方案引用交易（scenario.transaction_id / test_plan_transaction）后，
-    此处统计引用数；当前阶段恒为 0。running_runs 等更细粒度预检随引用方一并补充。
+    场景引用交易（scenario.transaction_id）后，此处统计引用数；
+    当前阶段恒为 0。running_runs 等更细粒度预检随引用方一并补充。
     """
     await ensure_project_access(db, project_id, user, "viewer")
     await _get_scoped_transaction(db, project_id, txn_id)
-    return ok({"transaction_id": txn_id, "scenarios": 0, "test_plans": 0})
+    return ok({"transaction_id": txn_id, "scenarios": 0})
 
 
 @router.delete("/projects/{project_id}/transactions/{txn_id}")
@@ -223,19 +223,18 @@ async def delete_transaction(
 ) -> dict:
     """删除交易（owner+）：遵循「预检 + force」模式。
 
-    A3/A4 场景或测试方案引用交易后，严格模式存在引用时拒绝（3053），
+    场景引用交易后，严格模式存在引用时拒绝（3053），
     需先解绑或 force；当前阶段交易无引用方，严格模式直接删除。
     """
     await ensure_project_access(db, project_id, user, "owner")
     txn = await _get_scoped_transaction(db, project_id, txn_id)
 
-    # A3/A4 落地后在此统计引用场景/方案数，
+    # 落地后在此统计引用场景数，
     # 严格模式引用数 > 0 抛 3053，force 模式先解除引用再删除
     referencing_scenarios = 0
-    referencing_plans = 0
-    if not force and (referencing_scenarios or referencing_plans):
+    if not force and referencing_scenarios:
         raise BusinessError(
-            f"交易被 {referencing_scenarios} 个场景、{referencing_plans} 个测试方案引用，"
+            f"交易被 {referencing_scenarios} 个场景引用，"
             "无法删除；请先解绑引用或携带 force=true 强制删除",
             code=3053,
         )
@@ -248,6 +247,5 @@ async def delete_transaction(
             "deleted": True,
             "force": force,
             "removed_scenarios": referencing_scenarios if force else 0,
-            "removed_test_plans": referencing_plans if force else 0,
         }
     )

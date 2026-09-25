@@ -435,7 +435,6 @@ async def test_precheck_txn_delete(client) -> None:
     assert r.json()["data"] == {
         "transaction_id": txn["id"],
         "scenarios": 0,
-        "test_plans": 0,
     }
 
 
