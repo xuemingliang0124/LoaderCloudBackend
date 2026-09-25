@@ -51,29 +51,36 @@ pipeline {
         stage('Run API Tests') {
             steps {
                 sh '''
+                    rm -rf reports
                     mkdir -p reports
 
                     # 容器内执行 pytest（tests/ 已在镜像内，无需挂载源码）：
-                    #   -v 挂载 reports/（读写）接收报告产物
                     #   -w /app  工作目录，保证 `from app.xxx import` 可解析
                     #   --entrypoint python  覆盖默认 entrypoint（默认跑 alembic 迁移，测试不需要）
+                    #   --name ptp-test-run  不用 --rm，跑完用 docker cp 取出报告
                     #   测试用内存 SQLite，不连接任何外部服务
                     #
-                    # 注意：不使用 set -e，因为 pytest 在有用例失败时退出码非零，
-                    #   直接中断会跳过后续的报告确认；这里手动捕获退出码，
-                    #   先确认报告生成，再以该退出码结束本步骤（让 Jenkins 正确标记成败）。
+                    # 【为什么不用 -v bind mount 取报告】
+                    #   Jenkins 自身跑在 Docker 容器里（挂载宿主机 docker.sock）。
+                    #   $(pwd) 是 Jenkins 容器内路径，docker daemon 在宿主机上，
+                    #   bind mount 源路径在宿主机不存在 → 报告丢失。
+                    #   docker cp 通过 API 流式传输，不依赖路径匹配，可正确取回。
                     set +e
-                    docker run --rm \\
-                        -v "$(pwd)/reports:/app/reports" \\
+                    docker run --name ptp-test-run \\
                         -w /app \\
                         --entrypoint python \\
                         "$TEST_IMAGE" \\
                         -m pytest tests/ -v \\
-                            --html=reports/test_report.html \\
+                            --html=/app/reports/test_report.html \\
                             --self-contained-html \\
-                            --junitxml=reports/junit.xml
+                            --junitxml=/app/reports/junit.xml
                     PYTEST_EXIT_CODE=$?
                     set -e
+
+                    # 从容器拷贝报告到 Jenkins 工作区
+                    docker cp ptp-test-run:/app/reports/. reports/
+                    # 清理容器
+                    docker rm ptp-test-run || true
 
                     echo "===== 报告产物确认 ====="
                     ls -la reports/ || true
