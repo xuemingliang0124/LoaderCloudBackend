@@ -51,7 +51,6 @@ pipeline {
         stage('Run API Tests') {
             steps {
                 sh '''
-                    set -e
                     mkdir -p reports
 
                     # 容器内执行 pytest（tests/ 已在镜像内，无需挂载源码）：
@@ -59,6 +58,11 @@ pipeline {
                     #   -w /app  工作目录，保证 `from app.xxx import` 可解析
                     #   --entrypoint python  覆盖默认 entrypoint（默认跑 alembic 迁移，测试不需要）
                     #   测试用内存 SQLite，不连接任何外部服务
+                    #
+                    # 注意：不使用 set -e，因为 pytest 在有用例失败时退出码非零，
+                    #   直接中断会跳过后续的报告确认；这里手动捕获退出码，
+                    #   先确认报告生成，再以该退出码结束本步骤（让 Jenkins 正确标记成败）。
+                    set +e
                     docker run --rm \\
                         -v "$(pwd)/reports:/app/reports" \\
                         -w /app \\
@@ -68,6 +72,13 @@ pipeline {
                             --html=reports/test_report.html \\
                             --self-contained-html \\
                             --junitxml=reports/junit.xml
+                    PYTEST_EXIT_CODE=$?
+                    set -e
+
+                    echo "===== 报告产物确认 ====="
+                    ls -la reports/ || true
+                    echo "pytest 退出码: $PYTEST_EXIT_CODE"
+                    exit $PYTEST_EXIT_CODE
                 '''
             }
         }
