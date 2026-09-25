@@ -59,7 +59,9 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = ""
     # 单请求最多段数 / 超时秒数 / 失败重试次数（指数退避后标记资产 FAILED）
-    embedding_batch_size: int = 64
+    # 默认 10：DashScope text-embedding 兼容端点硬限制单次 ≤10 条
+    # （超限 400 batch size is invalid）；智谱同样接受，仅请求数增多
+    embedding_batch_size: int = 10
     embedding_timeout: int = 30
     embedding_max_retries: int = 3
 

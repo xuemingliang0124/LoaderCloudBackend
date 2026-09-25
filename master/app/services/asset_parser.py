@@ -79,14 +79,17 @@ ENV_INVENTORY_COLUMN_MAP: dict[str, str] = {
     "描述": "description",
     "说明": "description",
     "备注": "description",
+    "description": "description",
 }
 TXN_INVENTORY_COLUMN_MAP: dict[str, str] = {
     "交易名称": "name",
     "交易名": "name",
     "名称": "name",
+    "name": "name",
     "交易码": "txn_code",
     "交易编码": "txn_code",
     "交易编号": "txn_code",
+    "txn_code": "txn_code",
     "目标tps": "sla_tps",
     "sla_tps": "sla_tps",
     "tps": "sla_tps",
@@ -95,10 +98,14 @@ TXN_INVENTORY_COLUMN_MAP: dict[str, str] = {
     "p95(ms)": "sla_p95_ms",
     "p95响应时间": "sla_p95_ms",
     "响应时间(ms)": "sla_p95_ms",
+    "sla_p95_ms": "sla_p95_ms",
     "错误率": "sla_error_rate",
     "sla错误率": "sla_error_rate",
+    "sla_error_rate": "sla_error_rate",
     "默认脚本": "default_script",
     "默认脚本名": "default_script",
+    "default_script": "default_script",
+    "default_script_id": "default_script",
     "描述": "description",
     "说明": "description",
     "备注": "description",
@@ -313,7 +320,15 @@ def extract_inventory_rows(
             # 表头前的散行不产生 unmatched 噪音，直接忽略
         if header_index < 0:
             extraction.warnings.append(f"第 {table_index} 张表未识别到表头行，已跳过")
+            logger.debug(
+                f"列映射: 第 {table_index} 张表无表头行（需≥2列命中映射表），"
+                f"首行内容={table[0] if table else []}"
+            )
             continue
+        logger.debug(
+            f"列映射: 第 {table_index} 张表表头=第{header_index + 1}行 "
+            f"原文={table[header_index]} 列→字段={field_by_col}"
+        )
         for row in table[header_index + 1 :]:
             values: dict[str, str] = {}
             for col_index, cell in enumerate(row):
@@ -321,6 +336,12 @@ def extract_inventory_rows(
                     values[field_by_col[col_index]] = cell
             if values:
                 extraction.rows.append(values)
+                if len(extraction.rows) <= 5:
+                    logger.debug(f"列映射: 第 {table_index} 张表数据行样例: {values}")
+    logger.debug(
+        f"列映射: 抽取完成 rows={len(extraction.rows)} "
+        f"unmatched_columns={extraction.unmatched_columns} warnings={extraction.warnings}"
+    )
     return extraction
 
 
@@ -354,6 +375,7 @@ def _build_transaction_row(
     script_id_by_name: dict[str, int],
 ) -> Transaction | None:
     """行字典 → Transaction ORM（txn_code 缺失跳过；默认脚本按名称关联）。"""
+    logger.debug(f"{row_label} 原始行数据: {values}")
     txn_code = _trunc(values.get("txn_code", ""), 64)
     if not txn_code:
         warnings.append(f"{row_label}缺少交易码（txn_code），已跳过")
@@ -470,11 +492,19 @@ async def _parse_asset(db: AsyncSession, asset_id: int) -> None:
         data = await storage.get_object_bytes(asset.file_key)
         ext = Path(asset.filename or "").suffix.lower()
         parsed = await asyncio.to_thread(dispatch_parse, ext, data)
+        logger.debug(
+            f"资产 {asset_id} 格式解析完成: ext={ext} 段落={len(parsed.paragraphs)} "
+            f"表格数={len(parsed.tables)} 各表行数={[len(t) for t in parsed.tables]}"
+        )
 
         # 路径 (b)：结构化抽取（仅清单类资产）
         column_map = _INVENTORY_COLUMN_MAPS.get(asset.asset_type)
         if column_map is not None:
             await _extract_structured(db, asset, parsed, column_map, meta)
+        else:
+            logger.debug(
+                f"资产 {asset_id} asset_type={asset.asset_type} 非清单类，跳过结构化抽取"
+            )
 
         # 路径 (a)：文本 → LangChain Loader → Cleaner → Chunker → Embeddings → 向量库
         #   清单类资产表格已结构化，不再入向量（include_tables=False）
@@ -526,6 +556,10 @@ async def _extract_structured(
     meta: dict[str, Any],
 ) -> None:
     """表格行 → 环境/交易表：应用层去重后落库（唯一键冲突行跳过并告警）。"""
+    logger.debug(
+        f"资产 {asset.id} 结构化抽取开始: asset_type={asset.asset_type} "
+        f"表格数={len(parsed.tables)}"
+    )
     extraction = extract_inventory_rows(parsed.tables, column_map)
     meta["unmatched_columns"] = extraction.unmatched_columns
     warnings = extraction.warnings
@@ -564,6 +598,7 @@ async def _extract_structured(
             )
         ).all()
         script_id_by_name = {name: sid for sid, name in script_rows}
+        logger.debug(f"资产 {asset.id} 项目内脚本名→ID 映射: {script_id_by_name}")
         candidates = [
             row
             for row in (
@@ -590,6 +625,10 @@ async def _extract_structured(
         kept = _dedupe_rows(candidates, "txn_code", existing_codes, warnings, "交易码")
         db.add_all(kept)
         meta["transactions"] = len(kept)
+        logger.debug(
+            f"资产 {asset.id} 交易抽取落库: 候选行={len(candidates)} 落库行={len(kept)} "
+            f"项目内既有交易码={sorted(existing_codes)}"
+        )
 
     meta["warnings"].extend(warnings)
     # 截断告警列表，防止超大清单把 parse_meta 撑爆

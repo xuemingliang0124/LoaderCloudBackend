@@ -22,6 +22,8 @@ from app.models.run_agent_result import RunAgentResult
 from app.models.scenario import Scenario
 from app.models.schedule import ScheduleJob
 from app.models.script import Script
+from app.models.test_plan import TestPlan
+from app.models.test_plan_scenario import TestPlanScenario
 from app.models.transaction import Transaction
 from app.schemas import ProjectIn, ProjectOut, ProjectUpdateIn
 from app.schemas.common import like_pattern, ok
@@ -214,6 +216,13 @@ async def precheck_project_delete(
             .where(Asset.project_id == project_id)
         )
     ) or 0
+    test_plans = (
+        await db.scalar(
+            select(func.count())
+            .select_from(TestPlan)
+            .where(TestPlan.project_id == project_id)
+        )
+    ) or 0
     running_runs = 0
     schedule_jobs: list = []
     if scenario_ids:
@@ -241,6 +250,7 @@ async def precheck_project_delete(
             "environments": int(environments),
             "transactions": int(transactions),
             "assets": int(assets),
+            "test_plans": int(test_plans),
             "scenarios": len(scenario_ids),
             "running_runs": int(running_runs),
             "schedule_jobs": [{"id": r.id, "name": r.name} for r in schedule_jobs],
@@ -298,6 +308,13 @@ async def delete_project(
         )
     ) or 0
     asset_count = len(asset_rows)
+    plan_count = (
+        await db.scalar(
+            select(func.count())
+            .select_from(TestPlan)
+            .where(TestPlan.project_id == project_id)
+        )
+    ) or 0
 
     # 未结束的执行任务：force 也不例外，必须先停止（与场景删除口径一致 3014）
     if scenario_ids:
@@ -318,11 +335,12 @@ async def delete_project(
             )
 
     if not force and (
-        script_rows or scenario_ids or env_count or txn_count or asset_count
+        script_rows or scenario_ids or env_count or txn_count or asset_count or plan_count
     ):
         raise BusinessError(
             f"项目下存在 {len(script_rows)} 个脚本、{env_count} 个环境、"
-            f"{txn_count} 个交易、{asset_count} 个文档资产、{len(scenario_ids)} 个场景，无法删除；"
+            f"{txn_count} 个交易、{asset_count} 个文档资产、{plan_count} 个测试方案、"
+            f"{len(scenario_ids)} 个场景，无法删除；"
             "请先通过删除预检接口确认后携带 force=true 强制删除",
             code=3023,
         )
@@ -330,6 +348,18 @@ async def delete_project(
     run_nos: list[str] = []
     schedule_rows: list[ScheduleJob] = []
     if force:
+        # 测试方案：先 bulk delete 挂载关联行（其 scenario_id/plan_id FK 均为
+        # RESTRICT，必须先于场景/方案删除解绑），再删方案行解除 test_project FK
+        plan_ids = (
+            (await db.execute(select(TestPlan.id).where(TestPlan.project_id == project_id)))
+            .scalars()
+            .all()
+        )
+        if plan_ids:
+            await db.execute(
+                delete(TestPlanScenario).where(TestPlanScenario.plan_id.in_(plan_ids))
+            )
+            await db.execute(delete(TestPlan).where(TestPlan.project_id == project_id))
         if scenario_ids:
             run_nos = (
                 (
@@ -433,6 +463,7 @@ async def delete_project(
             "removed_environments": int(env_count) if force else 0,
             "removed_transactions": int(txn_count) if force else 0,
             "removed_assets": int(asset_count) if force else 0,
+            "removed_test_plans": int(plan_count) if force else 0,
             "removed_scenarios": len(scenario_ids) if force else 0,
             "removed_runs": len(run_nos),
             "removed_schedules": len(schedule_rows) if force else 0,
