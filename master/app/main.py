@@ -20,6 +20,7 @@ from app.services import es_client, orchestrator, storage, user_service
 from app.services import vector_store
 from app.services.agent_registry import mark_stale_agents_offline
 from app.services.exceptions import BusinessError
+from app.services.llm.backends import register_tool_backends
 from app.services.scheduler import start_scheduler, stop_scheduler
 from app.ws.manager import agent_manager
 from app.ws.routes import router as ws_router
@@ -80,6 +81,8 @@ async def lifespan(_: FastAPI):
         await orchestrator.recover_active_runs()
     except Exception:  # noqa: BLE001
         logger.exception("重启执行现场恢复失败")
+    # LLM Function Calling 工具真实后端（DB/ES 接线，FR-06 Stage 4）
+    register_tool_backends()
     checker = asyncio.create_task(_offline_check_loop())
     logger.info(f"{settings.app_name} 启动完成")
     yield

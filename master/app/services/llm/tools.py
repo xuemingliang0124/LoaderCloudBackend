@@ -1,17 +1,18 @@
 """Function Calling 工具集（FR-06，SRS B.8）。
 
-8 个工具对应平台已有 REST 接口的封装：
-- 7 个静态工具（@tool 异步定义）：query_environments / query_transactions /
-  get_scenario / create_scenario / get_run_summary / get_realtime_summary /
-  query_metrics
+9 个工具对应平台已有 REST 接口的封装：
+- 8 个静态工具（@tool 异步定义）：query_projects / query_environments /
+  query_transactions / get_scenario / create_scenario / get_run_summary /
+  get_realtime_summary / query_metrics
 - 1 个 RAG 检索工具 search_knowledge：`create_retriever_tool` 包装 Retriever 生成
   （retriever 由 orchestrator.build_retriever 按 project_id 预绑定过滤，
   SRS FR-05 多租户隔离；无需手写工具逻辑，SRS FR-06 验收口径）
 
-后端接线：静态工具通过 `register_backend(name, fn)` 注册异步实现（Stage 4 由
-api 层注入 DB 会话查询逻辑后注册）；未接线时返回 {"error": ...} 占位而非抛
-异常，后端执行失败也包装为 error dict——保证 agent 编排链路鲁棒（工具失败
-可被 LLM 感知并降级回答，SRS NFR-02）。
+后端接线：静态工具通过 `register_backend(name, fn)` 注册异步实现；真实后端
+位于 app.services.llm.backends，由 lifespan 启动期 register_tool_backends
+一次性注册（DB 走 SessionLocal 短会话、运行指标走 ES）。未接线时返回
+{"error": ...} 占位而非抛异常，后端执行失败也包装为 error dict——保证
+agent 编排链路鲁棒（工具失败可被 LLM 感知并降级回答，SRS NFR-02）。
 
 args_schema 由 @tool 从类型注解自动生成（Pydantic 模型 → OpenAI Function
 Calling 规范的 JSON Schema，TC-PRM-002 验收点）。
@@ -52,6 +53,12 @@ async def _dispatch(tool_name: str, **kwargs) -> dict:
 
 
 @tool
+async def query_projects(name: str = "") -> dict:
+    """查询测试项目列表（项目ID/名称/描述等），可按项目名称模糊过滤；name 为空时返回全部项目。"""
+    return await _dispatch("query_projects", name=name)
+
+
+@tool
 async def query_environments(project_id: int, name: str = "") -> dict:
     """查询项目环境清单（环境编码/名称/基础URL/变量等），可按名称模糊过滤。"""
     return await _dispatch("query_environments", project_id=project_id, name=name)
@@ -71,8 +78,12 @@ async def get_scenario(scenario_id: int) -> dict:
 
 @tool
 async def create_scenario(
-    project_id: int, name: str, env_id: int, txn_id: int,
-    tps: float = 0.0, duration_seconds: int = 0,
+    project_id: int,
+    name: str,
+    env_id: int,
+    txn_id: int,
+    tps: float = 0.0,
+    duration_seconds: int = 0,
 ) -> dict:
     """创建压测场景（对应 POST /projects/{pid}/scenarios）：绑定环境与交易，指定目标 TPS 与运行时长。"""
     return await _dispatch(
@@ -121,8 +132,9 @@ def build_search_knowledge_tool(retriever) -> BaseTool:
 
 
 def build_tools(retriever=None) -> list[BaseTool]:
-    """组装工具集：7 个静态工具 + 可选 search_knowledge（传入 retriever 时）。"""
+    """组装工具集：8 个静态工具 + 可选 search_knowledge（传入 retriever 时）。"""
     tools: list[BaseTool] = [
+        query_projects,
         query_environments,
         query_transactions,
         get_scenario,

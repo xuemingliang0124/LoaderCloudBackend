@@ -15,11 +15,13 @@ from app.services.llm.tools import (
     build_tools,
     create_scenario,
     query_environments,
+    query_projects,
     register_backend,
     reset_backends,
 )
 
 _STATIC_TOOL_NAMES = {
+    "query_projects",
     "query_environments",
     "query_transactions",
     "get_scenario",
@@ -40,16 +42,16 @@ class FakeRetriever(BaseRetriever):
 # ---- 工具集组装 ----
 
 
-def test_build_tools_static_seven() -> None:
-    """不传 retriever 时返回 7 个静态工具，名字与 SRS FR-06 工具表一致。"""
+def test_build_tools_static_eight() -> None:
+    """不传 retriever 时返回 8 个静态工具，名字与 SRS FR-06 工具表一致。"""
     tools = build_tools()
     assert {t.name for t in tools} == _STATIC_TOOL_NAMES
 
 
-def test_build_tools_with_retriever_eight() -> None:
-    """传入 retriever 时追加 search_knowledge，共 8 个工具。"""
+def test_build_tools_with_retriever_nine() -> None:
+    """传入 retriever 时追加 search_knowledge，共 9 个工具。"""
     tools = build_tools(FakeRetriever(docs=[]))
-    assert len(tools) == 8
+    assert len(tools) == 9
     assert {t.name for t in tools} == _STATIC_TOOL_NAMES | {"search_knowledge"}
 
 
@@ -73,6 +75,13 @@ def test_args_schema_openai_compliant() -> None:
             assert "type" in prop, f"工具 {t.name} 参数 {key} 缺 type"
         required = schema.get("required", [])
         assert set(required) <= set(props), f"工具 {t.name} required 超出 properties"
+
+
+def test_query_projects_schema() -> None:
+    """query_projects：无必填参数，name 可选 string（空名返回全部项目）。"""
+    schema = query_projects.args_schema.model_json_schema()
+    assert schema.get("required", []) == []
+    assert schema["properties"]["name"]["type"] == "string"
 
 
 def test_query_environments_schema() -> None:
