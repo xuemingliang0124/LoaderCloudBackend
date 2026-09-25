@@ -26,6 +26,7 @@ services:
       - "--mysql-native-password=ON"       # ✅ 替换为这个新参数
       - "--character-set-server=utf8mb4"
       - "--collation-server=utf8mb4_unicode_ci"
+    restart: unless-stopped
 
   minio:
     # minio/minio 在 Docker Hub 被 daocloud 拒（denied），改走其 quay 镜像（MinIO 官方双发）
@@ -41,6 +42,7 @@ services:
       - "9001:9001"
     volumes:
       - minio_data:/data
+    restart: unless-stopped
 
   elasticsearch:
     # elasticsearch 是 Docker Hub 官方镜像（library 命名空间），与 docker.elastic.co 内容一致
@@ -53,6 +55,7 @@ services:
       - "9200:9200"
     volumes:
       - es_data:/usr/share/elasticsearch/data
+    restart: unless-stopped
 
   kibana:
     # 生产从 ACR 拉取；本地开发由 docker-compose.override.yml 注入 build: ./kibana
@@ -62,6 +65,7 @@ services:
     depends_on:
       elasticsearch:
         condition: service_started
+    restart: unless-stopped
 
   # 向量库：承担 pt-knowledge 语义检索（D2 引入）。
   # 选用 Qdrant 单容器：Rust 实现 + async SDK 原生，契合 ptp-dev 3.1 异步约束。
@@ -75,6 +79,7 @@ services:
       - "6334:6334"   # gRPC
     volumes:
       - qdrant_data:/qdrant/storage
+    restart: unless-stopped
 
   master:
     # 生产从 ACR 拉取；本地开发由 docker-compose.override.yml 注入 build: ../master
@@ -99,6 +104,7 @@ services:
         condition: service_started
       qdrant:
         condition: service_started
+    restart: unless-stopped
 
 volumes:
   mysql_data:
