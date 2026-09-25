@@ -31,8 +31,8 @@ pipeline {
         // 大多数 Linux 压测机用 host 网络；Docker Desktop 机器在 inventory 分组里覆盖 use_host_network=false
         booleanParam(name: 'USE_HOST_NETWORK', defaultValue: true,  description: '压力机 host 网络模式')
         // Master 地址（extra-vars 优先级最高，覆盖 inventory；控制器须能访问该地址做忙检测）
-        string(name: 'MASTER_API_BASE', defaultValue: 'http://192.168.0.102:8000/api/v1', description: 'Master API 基址（忙检测登录/查询用）')
-        string(name: 'MASTER_WS_URL',   defaultValue: 'ws://192.168.0.102:8000/ws/agent',  description: 'Agent 回连 Master 的 WebSocket 地址')
+        string(name: 'MASTER_API_BASE', defaultValue: 'http://localhost:8000/api/v1', description: 'Master API 基址（忙检测登录/查询用）')
+        string(name: 'MASTER_WS_URL',   defaultValue: 'ws://localhost:8000/ws/agent',  description: 'Agent 回连 Master 的 WebSocket 地址')
     }
 
     environment {
