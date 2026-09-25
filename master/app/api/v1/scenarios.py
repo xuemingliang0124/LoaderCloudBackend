@@ -24,8 +24,6 @@ from app.models.scenario import Scenario
 from app.models.scenario_script import ScenarioScript
 from app.models.scenario_script_tg import ScenarioScriptTG
 from app.models.script import Script
-from app.models.test_plan import TestPlan
-from app.models.test_plan_scenario import TestPlanScenario
 from app.schemas import (
     ScenarioIn,
     ScenarioOut,
@@ -414,21 +412,12 @@ async def precheck_scenario_delete(
             )
         )
     ).all()
-    # A4：场景被测试方案挂载的引用统计（预检展示，严格删除 3017 阻断）
-    plan_refs = (
-        await db.execute(
-            select(TestPlan.id, TestPlan.name)
-            .join(TestPlanScenario, TestPlanScenario.plan_id == TestPlan.id)
-            .where(TestPlanScenario.scenario_id == scenario_id)
-        )
-    ).all()
     return ok(
         {
             "scenario_id": scenario_id,
             "running_runs": int(running_runs),
             "history_runs": int(history_runs),
             "schedule_jobs": [{"id": r.id, "name": r.name} for r in schedules],
-            "test_plans": [{"id": r.id, "name": r.name} for r in plan_refs],
         }
     )
 
@@ -477,23 +466,9 @@ async def delete_scenario(
         .scalars()
         .all()
     )
-    # A4：测试方案挂载引用（弱关联，删除场景不级联删方案，仅解绑关联行）
-    plan_ref_rows = (
-        await db.execute(
-            select(TestPlan.id, TestPlan.name)
-            .join(TestPlanScenario, TestPlanScenario.plan_id == TestPlan.id)
-            .where(TestPlanScenario.scenario_id == scenario_id)
-        )
-    ).all()
 
     run_nos: list[str] = []
     if force:
-        # 解绑方案挂载：删除 test_plan_scenario 关联行，方案本身保留
-        await db.execute(
-            delete(TestPlanScenario).where(
-                TestPlanScenario.scenario_id == scenario_id
-            )
-        )
         run_nos = (
             (
                 await db.execute(
@@ -539,15 +514,6 @@ async def delete_scenario(
                 f"场景已被 {len(schedule_rows)} 个定时任务引用，请先删除对应定时任务：{preview}{more}",
                 code=3015,
             )
-        # A4：方案挂载阻断（弱关联，保持 Scenario 可独立执行的前提是显式解绑）
-        if plan_ref_rows:
-            preview = ", ".join(r.name for r in plan_ref_rows[:5])
-            more = " 等" if len(plan_ref_rows) > 5 else ""
-            raise BusinessError(
-                f"场景已被 {len(plan_ref_rows)} 个测试方案挂载，无法删除；"
-                f"请先在方案中移除该场景或携带 force=true 强制删除：{preview}{more}",
-                code=3017,
-            )
 
     await db.delete(scenario)
     await db.commit()
@@ -566,7 +532,6 @@ async def delete_scenario(
             "force": force,
             "removed_runs": len(run_nos),
             "removed_schedules": len(schedule_rows) if force else 0,
-            "removed_plan_refs": len(plan_ref_rows) if force else 0,
             "removed_artifacts": removed_artifacts,
         }
     )
