@@ -135,7 +135,9 @@ async def test_ensure_collection_creates_when_missing() -> None:
 
     client.create_collection.assert_awaited_once()
     call = client.create_collection.await_args
-    vc = call.kwargs["vectors_config"]
+    # 实现使用命名向量：vectors_config={"embedding": VectorParams(...)}，
+    # 需取出 embedding 对应的 VectorParams 再断言 size/distance
+    vc = call.kwargs["vectors_config"]["embedding"]
     assert vc.size == 1024
     assert vc.distance == qmodels.Distance.COSINE
     assert call.kwargs["collection_name"] == "pt_knowledge"
