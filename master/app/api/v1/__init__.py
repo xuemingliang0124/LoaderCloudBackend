@@ -17,6 +17,7 @@ from app.api.v1 import (
     scenarios,
     schedules,
     scripts,
+    test_plans,
     transactions,
     users,
 )
@@ -30,6 +31,7 @@ api_router.include_router(scripts.router, tags=["scripts"])
 api_router.include_router(projects.router, tags=["projects"])
 api_router.include_router(environments.router, tags=["environments"])
 api_router.include_router(transactions.router, tags=["transactions"])
+api_router.include_router(test_plans.router, tags=["test-plans"])
 api_router.include_router(assets.router, tags=["assets"])
 api_router.include_router(members.router, tags=["project-members"])
 api_router.include_router(users.router, tags=["users"])

@@ -59,9 +59,12 @@ def get_embeddings():
         from langchain_openai import OpenAIEmbeddings
 
         # OpenAIEmbeddings 字段：model / api_key(→openai_api_key) /
-        # base_url(→openai_api_base) / request_timeout / dimensions
+        # base_url(→openai_api_base) / request_timeout / dimensions / chunk_size
         # （embedding_ctx_length 是 token 上限，不是向量维度；max_retries 走
         #   retry_min_seconds/retry_max_seconds 默认值，不显式传）
+        # chunk_size：LangChain 内部 aembed_documents 按此切批（默认 1000），
+        # 必须对齐 embedding_batch_size——DashScope text-embedding 兼容端点
+        # 硬限制单次 ≤10 条，否则 400 "batch size is invalid"
         # check_embedding_ctx_length=False：默认 LangChain 会先用 tiktoken/transformers
         # 把文本分词成 token IDs 列表再传 input=[int,...]，OpenAI 原生端点支持，
         # 但 DashScope/智谱 OpenAI 兼容端点只接受 str | list[str]，收到 int 列表
@@ -72,6 +75,7 @@ def get_embeddings():
             api_key=settings.embedding_api_key,
             base_url=settings.embedding_base_url_resolved or None,
             request_timeout=settings.embedding_timeout,
+            chunk_size=settings.embedding_batch_size,
             check_embedding_ctx_length=False,
         )
         logger.info(

@@ -4,15 +4,15 @@
 >
 > 关键路径：P1.A1 → P1.A2 → P2.D1 → P2.D3 → P3.L1 → P3.L2
 >
-> **当前进度（2026-09-22）**：P1 A1/A2/A3 ✅、P2 D1/D2/D3/D4 ✅、P3 L1/L2/L3/L4 ✅ 全部完成；
-> 待办：A4 测试方案、D5 列映射修正、P4 SUT 监控、P5 微服务（挂起）。
+> **当前进度（2026-09-24）**：P1 A1/A2/A3/A4 ✅、P2 D1/D2/D3/D4 ✅、P3 L1/L2/L3/L4 ✅ 全部完成；
+> 待办：D5 列映射修正、P4 SUT 监控、P5 微服务（挂起）。
 
 ## 时间线总览
 
 | 阶段 | 时间 | 是否阻塞主线 | 状态 |
 |------|------|--------------|------|
 | P0 基础设施 | 0.5 周（并行） | 否 | 部分完成（I-1/I-3 待做，I-2 待驱动） |
-| P1 结构化资产 | 2-3 周 | 是 | A1/A2/A3 ✅，A4 待做 |
+| P1 结构化资产 | 2-3 周 | 是 | A1/A2/A3/A4 ✅ 全部完成 |
 | P2 文档管道 | 3-4 周 | 是 | D1/D2/D3/D4 ✅，D5 待做 |
 | P3 LLM 接入 | 3-4 周 | 是 | L1/L2/L3/L4 ✅ 全部完成 |
 | P4 SUT 监控 | 2 周 | 否（可插队） | 待启动 |
@@ -114,14 +114,30 @@
   - orchestrator -J 参数优先级：scenario.param_overrides > environment.variables；未绑定环境退化为纯场景级覆盖（向后兼容）
 - **验收**：master 全量 311 测试通过、ruff 全过
 
-### A4 测试方案（TestPlan）模块（弱关联 Scenario）
-- **新增文件**：`master/app/models/test_plan.py`、`test_plan_scenario.py`、对应 schema/api/migration/tests
-- **域模型**：
-  - `test_plans(id, project_id, name, pass_criteria(JSON), report_template, schedule_id?)`
-  - `test_plan_scenarios(id, plan_id, scenario_id, seq, weight)` 弱关联表
-- **关键约束**：不要强外键级联删除（保持 Scenario 可独立执行）
-- **验收**：方案可挂多个场景、可定义通过判据、可一键批量起场景
-- **工作量**：3-4 天
+### A4 测试方案（TestPlan）模块（弱关联 Scenario）✅ 已完成（2026-09-24）
+- **新增文件**：
+  - `master/app/models/test_plan.py`（方案 ORM）
+  - `master/app/models/test_plan_scenario.py`（方案-场景弱关联 ORM）
+  - `master/app/api/v1/test_plans.py`（路由：CRUD + 删除预检 + execute 一键批量起场景）
+  - `master/alembic/versions/20260924a1_test_plan.py`
+  - `master/tests/test_test_plans.py`（30 用例）
+- **修改文件**：
+  - `master/app/models/__init__.py`（导出 TestPlan/TestPlanScenario）
+  - `master/app/schemas/__init__.py`（TestPlanScenarioIn/Out、TestPlanIn/UpdateIn/Out 集中定义）
+  - `master/app/api/v1/__init__.py`（注册 test-plans 路由）
+  - `master/app/api/v1/projects.py`（删除预检加 test_plans 计数；3023 严格阻断含方案；force 级联先 bulk delete 挂载关联行再删方案，响应补 removed_test_plans）
+  - `master/app/api/v1/scenarios.py`（场景删除预检加 test_plans 引用列表；严格模式被挂载场景 3017 阻断；force 模式解绑关联行，响应补 removed_plan_refs）
+  - `master/tests/test_projects.py`（force 响应断言补 removed_test_plans）
+- **域模型字段**：
+  - `test_plan(id, project_id, name, pass_criteria(JSON), report_template, description)`
+  - `test_plan_scenario(id, plan_id, scenario_id, seq, weight)`
+- **关键约束**：
+  - 项目内 `(project_id, name)` 唯一（重复 3070；不存在 3071；跨项目 3072；挂载场景不存在/跨项目 3073；方案内重复挂载 3074；引用阻断 3075 预留恒 0；空方案执行 3076）
+  - 弱关联不级联删场景（保持 Scenario 可独立执行）：plan_id/scenario_id FK 均 RESTRICT；方案删除走 ORM delete-orphan 仅清关联行；场景删除严格 3017 阻断、force 应用层解绑
+  - 挂载管理：create/update 传 scenarios 全量替换（clear()+append() 规避身份映射陷阱），响应装配 scenario_name 按 seq 升序
+  - execute 一键批量：按 seq 升序逐个 orchestrator.create_run（MANUAL），单场景失败不阻断，返回逐场景明细（run_no/error + succeeded/failed 计数）
+  - viewer+ 可查、editor+ 增改/执行、owner+ 可删；schedule_id 字段本期不加（方案级定时调度后续扩展）
+- **验收**：master 全量 545 测试通过、ruff 全过（test_vector_store 1 失败为 D2 预存在问题，与本次无关）
 
 ---
 

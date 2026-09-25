@@ -34,7 +34,9 @@ if TYPE_CHECKING:
 # ---------- FR-02 Cleaner ----------
 
 # "Page x of y" / "第 x 页 / 共 y 页" 页眉
-_PAGE_HEADER_RE = re.compile(r"(?:Page\s+\d+\s+of\s+\d+|第\s*\d+\s*页\s*[/,／]\s*共\s*\d+\s*页)", re.IGNORECASE)
+_PAGE_HEADER_RE = re.compile(
+    r"(?:Page\s+\d+\s+of\s+\d+|第\s*\d+\s*页\s*[/,／]\s*共\s*\d+\s*页)", re.IGNORECASE
+)
 # 断词修复：word-\nword → wordword（英文连字符换行）
 _HYPHEN_BREAK_RE = re.compile(r"(\w)-\n(\w)")
 # 非段落换行（单 \n，前后非 \n）转空格，保留段落分隔 \n\n
@@ -155,7 +157,11 @@ async def index_chunks(
     # LCEL 链：clean → chunk
     pipeline = build_index_pipeline()
     chunks = pipeline.invoke(documents)
-    chunk_texts = [d.page_content for d in chunks]
+    # 过滤空/纯空白切片：DashScope 拒绝空 input（400 Range of input length），
+    # 也避免脏切片污染向量库
+    chunk_texts = [
+        d.page_content for d in chunks if d.page_content and d.page_content.strip()
+    ]
     if not chunk_texts:
         return []
 

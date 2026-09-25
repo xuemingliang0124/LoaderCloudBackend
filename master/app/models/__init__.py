@@ -26,6 +26,8 @@ from app.models.scenario import Scenario
 from app.models.scenario_script import ScenarioScript
 from app.models.scenario_script_tg import ScenarioScriptTG
 from app.models.script import Script
+from app.models.test_plan import TestPlan
+from app.models.test_plan_scenario import TestPlanScenario
 from app.models.transaction import Transaction
 from app.models.user import User
 
@@ -55,6 +57,8 @@ __all__ = [
     "ScenarioScriptTG",
     "ScheduleJob",
     "Script",
+    "TestPlan",
+    "TestPlanScenario",
     "TimestampMixin",
     "Transaction",
     "User",
