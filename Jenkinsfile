@@ -1,6 +1,7 @@
-// Jenkins Pipeline：构建 master/agent/kibana 镜像 → 推送阿里云 ACR → SSH 部署 master
+// Jenkins Pipeline：构建 master/agent/kibana 镜像 → 推送阿里云 ACR → 接口测试 → SSH 部署 master
 //
-// 职责边界：本流水线只做镜像构建 + master 部署。Agent 批量部署由独立流水线
+// 质量门禁：镜像推送后同步触发 ptp-api-tests 接口测试流水线，测试通过才部署；
+//   测试失败则本流水线标记失败，阻断部署。Agent 批量部署由独立流水线
 //   Jenkinsfile.agents 承担，通过 hook 触发，接收镜像 tag 后跑 Ansible 升级。
 //   解耦目的：master 构建与压测机升级互不影响，升级时机由 hook 自行控制。
 //
@@ -59,6 +60,20 @@ pipeline {
                             docker push ${REGISTRY}/${img.name}:latest
                         """
                     }
+                }
+            }
+        }
+
+        stage('Run API Tests') {
+            steps {
+                script {
+                    // 同步触发接口测试流水线：测试通过才继续部署
+                    // wait: true       = 阻塞等待测试流水线执行完毕
+                    // propagate: true  = 测试失败时本流水线也标记失败，阻断后续部署
+                    build job: 'ptp-api-tests',
+                          parameters: [string(name: 'IMAGE_TAG', value: "${IMAGE_TAG}")],
+                          wait: true,
+                          propagate: true
                 }
             }
         }
