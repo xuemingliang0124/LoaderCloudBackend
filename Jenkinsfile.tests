@@ -1,13 +1,16 @@
 // Jenkins Pipeline：Master 接口测试流水线（pytest + httpx，内存 SQLite，无外部依赖）
 //
 // 触发方式：
-//   1) 由主流水线 Jenkinsfile 在构建成功后通过 build step 自动触发（推荐）
-//   2) 手动在 Jenkins UI 点击 Build（IMAGE_TAG 留空时本地构建镜像）
+//   1) 由主流水线 Jenkinsfile 在镜像推送后通过 build step 自动触发（推荐）
+//   2) 手动在 Jenkins UI 点击 Build（IMAGE_TAG 填 ACR 上已存在的 tag，如 latest）
 //
 // 测试环境说明：
-//   - 基于 master 镜像（含全部 Python 依赖），无需在 Jenkins agent 装 Python 包
-//   - 容器内挂载 tests/ 与 pytest.ini，覆盖 entrypoint 直接跑 pytest
-//   - 测试用 aiosqlite 内存库（conftest.py StaticPool），无需 MySQL/MinIO/ES
+//   - 直接 pull 主流水线构建好的 ptp-master 镜像，不重复构建（省时）
+//   - 镜像内自带 tests/ 与 pytest.ini，与 app 代码同一次构建产出，版本严格一致
+//   - 覆盖 entrypoint 直接跑 pytest；测试用 aiosqlite 内存库，无需 MySQL/MinIO/ES
+//
+// 前置条件（Jenkins 凭据配置）：
+//   1) ACR_DOCKER_CONFIG — Secret file，docker login 后的 config.json（pull 私有镜像用）
 //
 // 产物：
 //   - reports/test_report.html  — pytest-html 自包含 HTML 报告（可直接邮件发送）
@@ -17,32 +20,30 @@ pipeline {
     agent any
 
     parameters {
-        // 上游 master 流水线传入的镜像 tag；留空则本地构建（手动触发时用）
-        string(name: 'IMAGE_TAG', defaultValue: '', description: '上游传入的 master 镜像 tag（留空则本地构建）')
+        // 上游 master 流水线传入的镜像 tag（必须是已 push 到 ACR 的版本）
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'ACR 上的 ptp-master 镜像 tag（上游自动传入，手动构建时填已存在的 tag）')
     }
 
     environment {
-        // 与主流水线保持一致的 ACR 命名空间（当前本地构建不使用，保留供未来扩展）
-        REGISTRY = 'registry.cn-beijing.aliyuncs.com/xml066'
+        // 与主流水线保持一致的 ACR 命名空间
+        REGISTRY    = 'registry.cn-beijing.aliyuncs.com/xml066'
+        // 被测镜像 = 主流水线已推送的那个，测试代码随镜像一起分发
+        TEST_IMAGE  = "${REGISTRY}/ptp-master:${params.IMAGE_TAG}"
     }
 
     stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
-        stage('Prepare Test Image') {
+        stage('Pull Test Image') {
             steps {
                 script {
-                    // 统一本地构建 master 镜像作为测试载体：
-                    //   - 不依赖 ACR 拉取凭据
-                    //   - Docker 层缓存命中时构建极快
-                    //   - 测试环境与生产镜像完全一致
-                    sh '''
-                        docker build -f master/Dockerfile -t ptp-master:test master
-                    '''
+                    // 复用主流水线已推送的镜像，不再 docker build
+                    withCredentials([file(credentialsId: 'ACR_DOCKER_CONFIG', variable: 'DOCKER_CONFIG_FILE')]) {
+                        sh '''
+                            mkdir -p ~/.docker
+                            cp "$DOCKER_CONFIG_FILE" ~/.docker/config.json
+                            chmod 600 ~/.docker/config.json
+                            docker pull "$TEST_IMAGE"
+                        '''
+                    }
                 }
             }
         }
@@ -53,19 +54,16 @@ pipeline {
                     set -e
                     mkdir -p reports
 
-                    # 容器内执行 pytest：
-                    #   -v 挂载 tests/（只读）与 pytest.ini（只读）
+                    # 容器内执行 pytest（tests/ 已在镜像内，无需挂载源码）：
                     #   -v 挂载 reports/（读写）接收报告产物
-                    #   -w /app  工作目录设为 /app，保证 `from app.xxx import` 可解析
-                    #   --entrypoint python  覆盖默认 entrypoint（默认会跑 alembic 迁移，测试不需要）
+                    #   -w /app  工作目录，保证 `from app.xxx import` 可解析
+                    #   --entrypoint python  覆盖默认 entrypoint（默认跑 alembic 迁移，测试不需要）
                     #   测试用内存 SQLite，不连接任何外部服务
                     docker run --rm \\
-                        -v "$(pwd)/master/tests:/app/tests:ro" \\
-                        -v "$(pwd)/master/pytest.ini:/app/pytest.ini:ro" \\
                         -v "$(pwd)/reports:/app/reports" \\
                         -w /app \\
                         --entrypoint python \\
-                        ptp-master:test \\
+                        "$TEST_IMAGE" \\
                         -m pytest tests/ -v \\
                             --html=reports/test_report.html \\
                             --self-contained-html \\
@@ -84,8 +82,8 @@ pipeline {
             // 归档 HTML 报告与 JUnit XML，可在构建详情页 "Artifacts" 下载查看
             archiveArtifacts artifacts: 'reports/**/*', allowEmptyArchive: true
 
-            // 清理本次构建的测试镜像
-            sh 'docker image rm ptp-master:test || true'
+            // 清理本次 pull 的镜像
+            sh 'docker image rm "$TEST_IMAGE" || true'
         }
         success {
             echo '✅ 接口测试全部通过'
