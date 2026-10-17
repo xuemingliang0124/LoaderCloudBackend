@@ -12,8 +12,10 @@
 
 import hashlib
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import Response
 from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +32,7 @@ from app.schemas import (
     KnowledgeSearchOut,
 )
 from app.schemas.common import like_pattern, ok
-from app.services import storage
+from app.services import asset_template, storage
 from app.services.asset_parser import schedule_asset_parse
 from app.services.exceptions import BusinessError
 from app.services.llm.client import format_citation
@@ -40,12 +42,14 @@ router = APIRouter()
 
 # 资产类型 → 允许的文件扩展名（小写，含点）：上传与类型变更时校验，
 # 保证 D3 解析管道能按扩展名分发到对应解析器
+# - .md：全部类型支持（文档类纯文本入向量 / 清单类管道表格结构化抽取）
+# - .json：仅清单类支持（parse_json_inventory，仅认 {"items": [...]} 形态）
 _ASSET_TYPE_EXTENSIONS: dict[AssetType, tuple[str, ...]] = {
-    AssetType.PLAN_DOC: (".docx", ".doc", ".pdf"),
-    AssetType.ENV_INVENTORY: (".xlsx", ".xls"),
-    AssetType.TXN_INVENTORY: (".xlsx", ".xls"),
-    AssetType.SLA_DOC: (".docx", ".doc", ".pdf"),
-    AssetType.ARCHITECTURE_DOC: (".docx", ".doc", ".pdf", ".pptx"),
+    AssetType.PLAN_DOC: (".docx", ".doc", ".pdf", ".md"),
+    AssetType.ENV_INVENTORY: (".xlsx", ".xls", ".md", ".json"),
+    AssetType.TXN_INVENTORY: (".xlsx", ".xls", ".md", ".json"),
+    AssetType.SLA_DOC: (".docx", ".doc", ".pdf", ".md"),
+    AssetType.ARCHITECTURE_DOC: (".docx", ".doc", ".pdf", ".pptx", ".md"),
 }
 
 
@@ -337,3 +341,44 @@ async def knowledge_search(
         )
     result = KnowledgeSearchOut(total=len(items), items=items)
     return ok(result.model_dump())
+
+
+@router.get("/assets/templates/{asset_type}")
+async def download_asset_template(
+    asset_type: str,
+    fmt: str = Query("xlsx", description="模板格式：xlsx/json/md"),
+    user: CurrentUser = Depends(get_current_user),
+) -> Response:
+    """下载资产导入模板（登录用户，项目无关）。
+
+    模板由后端按 asset_parser 列映射规则动态生成，保证模板表头与解析
+    规则一致（单一真相源）。格式矩阵见 services/asset_template.TEMPLATE_FORMATS：
+    清单类支持 xlsx/json/md，文档类仅 md。
+    - asset_type 非法或该类型不支持指定格式 → 3060
+    - 响应为二进制流 + Content-Disposition attachment（RFC 5987 中文文件名）
+    """
+    if asset_type not in asset_template.ASSET_TYPE_LABELS:
+        raise BusinessError(
+            f"未知资产类型 {asset_type}，可选值："
+            f"{', '.join(asset_template.ASSET_TYPE_LABELS)}",
+            code=3060,
+        )
+    fmt = fmt.strip().lower()
+    supported = asset_template.template_supported_formats(asset_type)
+    if fmt not in supported:
+        raise BusinessError(
+            f"资产类型 {asset_type} 的模板仅支持 {', '.join(supported)} 格式，"
+            f"当前请求 {fmt or '（空）'}",
+            code=3060,
+        )
+
+    data, media_type, filename = await asset_template.generate_template(asset_type, fmt)
+    quoted = quote(filename)
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}",
+            "Content-Length": str(len(data)),
+        },
+    )

@@ -218,6 +218,59 @@ async def test_upload_plan_doc_accepts_pdf(client, monkeypatch) -> None:
     assert r.status_code == 200
 
 
+# ---------- 扩展名矩阵扩展（md / json） ----------
+
+
+async def test_upload_md_accepted_for_all_types(client, monkeypatch) -> None:
+    """.md 全类型可上传。"""
+    monkeypatch.setattr("app.services.storage.upload_bytes", _fake_upload)
+    cases = [
+        ("plan_doc", "方案.md"),
+        ("sla_doc", "sla.md"),
+        ("architecture_doc", "架构.md"),
+        ("env_inventory", "环境清单.md"),
+        ("txn_inventory", "交易清单.md"),
+    ]
+    for index, (asset_type, filename) in enumerate(cases):
+        pid = await _create_project(client, f"md项目{index}")
+        r = await client.post(
+            f"/api/v1/projects/{pid}/assets",
+            data={"asset_type": asset_type},
+            files=_files("# 标题\n\n正文".encode("utf-8"), filename),
+            headers=_auth("alice"),
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["data"]["reused"] is False
+
+
+async def test_upload_json_inventory_accepted(client, monkeypatch) -> None:
+    """.json 清单类可上传。"""
+    monkeypatch.setattr("app.services.storage.upload_bytes", _fake_upload)
+    pid = await _create_project(client, "json清单项目")
+    r = await client.post(
+        f"/api/v1/projects/{pid}/assets",
+        data={"asset_type": "env_inventory"},
+        files=_files(b'{"items": []}', "环境清单.json"),
+        headers=_auth("alice"),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["data"]["asset_type"] == "env_inventory"
+
+
+async def test_upload_json_doc_type_rejected_3060(client, monkeypatch) -> None:
+    """文档类上传 .json → 3060（JSON 仅清单类开放）。"""
+    monkeypatch.setattr("app.services.storage.upload_bytes", _fake_upload)
+    pid = await _create_project(client, "json文档项目")
+    r = await client.post(
+        f"/api/v1/projects/{pid}/assets",
+        data={"asset_type": "plan_doc"},
+        files=_files(b'{"items": []}', "方案.json"),
+        headers=_auth("alice"),
+    )
+    assert r.status_code == 400
+    assert r.json()["code"] == 3060
+
+
 # ---------- hash 去重 ----------
 
 

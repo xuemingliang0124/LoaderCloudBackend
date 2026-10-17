@@ -153,7 +153,9 @@ class FakeEmbeddings:
 def fake_vector_store(monkeypatch) -> FakeStore:
     """P3 Stage 1：mock 路径改为 langchain_pipeline.get_vector_store。"""
     store = FakeStore()
-    monkeypatch.setattr("app.services.langchain_pipeline.get_vector_store", lambda: store)
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_vector_store", lambda: store
+    )
     return store
 
 
@@ -161,7 +163,9 @@ def fake_vector_store(monkeypatch) -> FakeStore:
 def fake_embeddings(monkeypatch) -> FakeEmbeddings:
     """P3 Stage 1：mock langchain_pipeline.get_embeddings 返回 FakeEmbeddings。"""
     embeddings = FakeEmbeddings()
-    monkeypatch.setattr("app.services.langchain_pipeline.get_embeddings", lambda: embeddings)
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_embeddings", lambda: embeddings
+    )
     return embeddings
 
 
@@ -532,7 +536,9 @@ async def test_retry_parse_flow(client, db_env, monkeypatch):
         "app.services.langchain_pipeline.get_embeddings", lambda: FakeEmbeddings()
     )
     store = FakeStore()
-    monkeypatch.setattr("app.services.langchain_pipeline.get_vector_store", lambda: store)
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_vector_store", lambda: store
+    )
     scheduled: list[int] = []
     monkeypatch.setattr(
         "app.api.v1.assets.schedule_asset_parse",
@@ -568,6 +574,247 @@ def update_asset_status(asset_id: int, status: str):
     from sqlalchemy import update
 
     return update(Asset).where(Asset.id == asset_id).values(status=status)
+
+
+def _md(data: str) -> bytes:
+    return data.encode("utf-8")
+
+
+def _json_bytes(payload) -> bytes:
+    import json
+
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+# ---------- markdown / JSON 清单（格式扩展） ----------
+
+
+def test_parse_markdown_escapes_and_tables() -> None:
+    r"""单元测试：\| 转义还原 + 分隔行跳过 + 段落/表格分块。"""
+    from app.services.asset_parser import parse_markdown
+
+    parsed = parse_markdown(
+        "# 标题\n\n| 名称 | 含\\|值 |\n| --- | --- |\n| a | b\\|c |\n\n正文段落".encode(
+            "utf-8"
+        )
+    )
+    assert parsed.paragraphs == ["# 标题", "正文段落"]
+    assert parsed.tables == [[["名称", "含|值"], ["a", "b|c"]]]
+
+
+async def test_md_env_inventory_extracts_and_indexes(
+    client, db_env, monkeypatch, fake_vector_store, fake_embeddings
+):
+    """md 清单：管道表格结构化抽取 + 表格外说明文字入向量库。"""
+    _patch_storage(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_settings",
+        lambda: _make_settings(embedding_dims=4),
+    )
+    monkeypatch.setattr(
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
+    )
+    pid = await _create_project(client, "md清单项目")
+    data = _md(
+        "# 环境交付清单\n"
+        "\n"
+        "> 本清单为生产环境交付说明，供平台知识库检索引用。\n"
+        "\n"
+        "| 环境名称 | 环境编码 | 基础URL | 主机 |\n"
+        "| --- | --- | --- | --- |\n"
+        "| 生产环境 | prod | http://prod.example.com | 10.0.0.1,10.0.0.2 |\n"
+    )
+    asset = await _upload(client, pid, data, "环境交付清单.md", "env_inventory")
+    await run_asset_parse(asset["id"], db_env)
+
+    async with db_env() as db:
+        row = (
+            await db.execute(select(Asset).where(Asset.id == asset["id"]))
+        ).scalar_one()
+        assert row.status == "ready"
+        assert row.parse_meta["environments"] == 1
+        assert row.parse_meta["chunks"] >= 1  # 说明文字切块入库
+        assert row.parse_meta["indexed"] is True
+        assert row.parse_meta["unmatched_columns"] == []
+        env = (
+            await db.execute(select(Environment).where(Environment.project_id == pid))
+        ).scalar_one()
+    assert env.env_code == "prod"
+    assert env.hosts == ["10.0.0.1", "10.0.0.2"]
+    assert fake_vector_store.upserted  # 向量库有说明文字切片
+
+
+async def test_md_inventory_table_only_zero_chunks(client, db_env, monkeypatch):
+    """md 清单纯表格（无说明文字）：结构化抽取正常，chunks=0 不视为失败。"""
+    _patch_storage(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
+    )
+    pid = await _create_project(client, "md纯表格项目")
+    data = _md("| 环境名称 | 环境编码 |\n| --- | --- |\n| 生产环境 | prod |\n")
+    asset = await _upload(client, pid, data, "纯表格清单.md", "env_inventory")
+    await run_asset_parse(asset["id"], db_env)
+
+    async with db_env() as db:
+        row = (
+            await db.execute(select(Asset).where(Asset.id == asset["id"]))
+        ).scalar_one()
+        assert row.status == "ready"
+        assert row.parse_meta["environments"] == 1
+        assert row.parse_meta["chunks"] == 0
+        assert row.parse_meta["indexed"] is False
+
+
+async def test_md_plan_doc_chunks_indexed(
+    client, db_env, monkeypatch, fake_vector_store, fake_embeddings
+):
+    """md 方案文档：全文切块入向量库（metadata 溯源正确）。"""
+    _patch_storage(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.langchain_pipeline.get_settings",
+        lambda: _make_settings(embedding_dims=4),
+    )
+    monkeypatch.setattr(
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
+    )
+    pid = await _create_project(client, "md方案项目")
+    data = _md("# 性能测试方案\n\n## 测试目标\n\n" + "验证系统吞吐与响应时间。" * 80)
+    asset = await _upload(client, pid, data, "性能测试方案.md", "plan_doc")
+    await run_asset_parse(asset["id"], db_env)
+
+    async with db_env() as db:
+        row = (
+            await db.execute(select(Asset).where(Asset.id == asset["id"]))
+        ).scalar_one()
+        assert row.status == "ready"
+        assert row.parse_meta["chunks"] >= 1
+        assert row.parse_meta["indexed"] is True
+    first = fake_vector_store.upserted[0]
+    assert first.asset_id == asset["id"]
+    assert first.project_id == pid
+    assert first.asset_type == "plan_doc"
+    assert first.source_ref == f"assets/{asset['id']}/性能测试方案.md"
+
+
+async def test_json_env_inventory_chinese_keys(client, db_env, monkeypatch):
+    """json 清单中文键：{"items": [...]} → 结构化抽取，不入向量。"""
+    _patch_storage(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
+    )
+    pid = await _create_project(client, "json清单项目")
+    data = _json_bytes(
+        {
+            "items": [
+                {
+                    "环境名称": "生产环境",
+                    "环境编码": "prod",
+                    "主机": ["10.0.0.1", "10.0.0.2"],
+                    "变量": {"timeout": 30},
+                },
+                {"环境名称": "预发环境", "环境编码": "staging"},
+            ]
+        }
+    )
+    asset = await _upload(client, pid, data, "环境清单.json", "env_inventory")
+    await run_asset_parse(asset["id"], db_env)
+
+    async with db_env() as db:
+        row = (
+            await db.execute(select(Asset).where(Asset.id == asset["id"]))
+        ).scalar_one()
+        assert row.status == "ready"
+        assert row.parse_meta["environments"] == 2
+        assert row.parse_meta["chunks"] == 0  # JSON 原文不入向量库
+        assert row.parse_meta["indexed"] is False
+        envs = {
+            e.env_code: e
+            for e in (
+                await db.execute(
+                    select(Environment).where(Environment.project_id == pid)
+                )
+            )
+            .scalars()
+            .all()
+        }
+    assert set(envs) == {"prod", "staging"}
+    assert envs["prod"].hosts == ["10.0.0.1", "10.0.0.2"]
+    assert envs["prod"].variables == {"timeout": 30}
+
+
+async def test_json_env_inventory_english_keys(client, db_env, monkeypatch):
+    """json 清单英文键（snake_case 别名）→ 命中 ENV 列映射。"""
+    _patch_storage(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
+    )
+    pid = await _create_project(client, "json英文键项目")
+    data = _json_bytes(
+        {
+            "items": [
+                {
+                    "name": "生产环境",
+                    "env_code": "prod",
+                    "base_url": "http://prod.example.com",
+                }
+            ]
+        }
+    )
+    asset = await _upload(client, pid, data, "envs.json", "env_inventory")
+    await run_asset_parse(asset["id"], db_env)
+
+    async with db_env() as db:
+        row = (
+            await db.execute(select(Asset).where(Asset.id == asset["id"]))
+        ).scalar_one()
+        assert row.status == "ready"
+        assert row.parse_meta["environments"] == 1
+        env = (
+            await db.execute(select(Environment).where(Environment.project_id == pid))
+        ).scalar_one()
+    assert env.env_code == "prod"
+    assert env.base_url == "http://prod.example.com"
+
+
+async def test_json_inventory_invalid_shape_failed(client, db_env, monkeypatch):
+    """json 非 {"items":[...]} 形态（裸数组）→ FAILED，错误信息引导下载模板。"""
+    _patch_storage(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
+    )
+    pid = await _create_project(client, "json裸数组项目")
+    asset = await _upload(
+        client, pid, _json_bytes([{"name": "x"}]), "bad.json", "env_inventory"
+    )
+    await run_asset_parse(asset["id"], db_env)
+
+    async with db_env() as db:
+        row = (
+            await db.execute(select(Asset).where(Asset.id == asset["id"]))
+        ).scalar_one()
+        assert row.status == "failed"
+        assert "items" in row.parse_meta["error"]
+        assert "模板" in row.parse_meta["error"]
+
+
+async def test_json_inventory_broken_syntax_failed(client, db_env, monkeypatch):
+    """json 语法错误 → FAILED。"""
+    _patch_storage(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.asset_parser.get_settings", lambda: _make_settings()
+    )
+    pid = await _create_project(client, "json坏语法项目")
+    asset = await _upload(
+        client, pid, b"{not valid json", "broken.json", "txn_inventory"
+    )
+    await run_asset_parse(asset["id"], db_env)
+
+    async with db_env() as db:
+        row = (
+            await db.execute(select(Asset).where(Asset.id == asset["id"]))
+        ).scalar_one()
+        assert row.status == "failed"
+        assert "JSON" in row.parse_meta["error"]
 
 
 async def test_retry_parse_viewer_denied(client, db_env, monkeypatch):

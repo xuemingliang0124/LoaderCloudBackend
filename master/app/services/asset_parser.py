@@ -75,11 +75,19 @@ ENV_INVENTORY_COLUMN_MAP: dict[str, str] = {
     "变量": "variables",
     "变量覆盖": "variables",
     "参数": "variables",
-    "参数覆盖": "variables",
     "描述": "description",
     "说明": "description",
     "备注": "description",
     "description": "description",
+    # 英文键别名（JSON 清单常用 snake_case 键，小写归一化后精确匹配）
+    "name": "name",
+    "env_code": "env_code",
+    "base_url": "base_url",
+    "hosts": "hosts",
+    "db_connections": "db_connections",
+    "middleware": "middleware_info",
+    "middleware_info": "middleware_info",
+    "variables": "variables",
 }
 TXN_INVENTORY_COLUMN_MAP: dict[str, str] = {
     "交易名称": "name",
@@ -194,14 +202,131 @@ def parse_pdf(data: bytes) -> ParsedDoc:
     return ParsedDoc(paragraphs=paragraphs, tables=tables)
 
 
+# ---------- markdown / JSON 解析（纯文本实现，零额外依赖） ----------
+
+_MD_TABLE_PLACEHOLDER = "\x00"  # \| 转义切分占位符
+_MD_SEPARATOR_CELL = re.compile(r":?-{3,}:?")
+
+
+def _is_md_table_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.count("|") >= 2
+
+
+def _split_md_row(line: str) -> list[str]:
+    """切分管道表格行：去首尾 | 后按 | 切分，\\| 转义还原为字面 |。"""
+    stripped = line.strip().strip("|").replace("\\|", _MD_TABLE_PLACEHOLDER)
+    return [c.strip().replace(_MD_TABLE_PLACEHOLDER, "|") for c in stripped.split("|")]
+
+
+def _is_md_separator_row(cells: list[str]) -> bool:
+    """识别 |---|:---:| 分隔行：全部非空单元格形如 :--- / ---: / :---:。"""
+    non_empty = [c for c in cells if c]
+    return bool(non_empty) and all(_MD_SEPARATOR_CELL.fullmatch(c) for c in non_empty)
+
+
+def parse_markdown(data: bytes) -> ParsedDoc:
+    """markdown：管道表格 → tables，其余非空行 → paragraphs。
+
+    连续以 | 开头的行块识别为管道表格（表头 + 可选 |---| 分隔行 + 数据行）；
+    其余非空行按原文进 paragraphs（标题/说明文字），清洗交给下游 Cleaner。
+    """
+    text = data.decode("utf-8", errors="replace")
+    paragraphs: list[str] = []
+    tables: list[list[list[str]]] = []
+    table_buf: list[list[str]] = []
+
+    def _flush() -> None:
+        nonlocal table_buf
+        if table_buf:
+            tables.append(table_buf)
+            table_buf = []
+
+    for line in text.splitlines():
+        if _is_md_table_line(line):
+            cells = _split_md_row(line)
+            if _is_md_separator_row(cells):
+                continue  # |---| 分隔行不产出数据行
+            table_buf.append(cells)
+        else:
+            _flush()
+            stripped = line.strip()
+            if stripped:
+                paragraphs.append(stripped)
+    _flush()
+    return ParsedDoc(paragraphs=paragraphs, tables=tables)
+
+
+def parse_json_inventory(data: bytes) -> ParsedDoc:
+    """JSON 清单解析：仅认 {"items": [...]} 形态，归一化为二维表。
+
+    - items 每个元素须为对象；对象键作为表头（中英文均可，复用列映射归一化匹配）
+    - 产出 tables=[[表头行, 数据行...]]、paragraphs=[]：JSON 是机器导向格式，
+      原文不切块入向量库（与 xlsx 清单"表格已结构化即不入向量"口径一致），
+      结构化抽取由 _extract_structured 走列映射完成
+    - 数组/对象值 json.dumps 序列化为字符串，交由宽松解析器（_split_list_value 等）二次处理
+    """
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"JSON 文件解析失败，请检查文件编码与语法: {exc}") from exc
+
+    if not isinstance(payload, dict) or set(payload.keys()) != {"items"}:
+        raise ValueError(
+            'JSON 清单仅支持 {"items": [...]} 格式，请从平台下载模板后填写'
+        )
+    items = payload["items"]
+    if not isinstance(items, list):
+        raise ValueError("JSON 清单 items 须为数组，请从平台下载模板后填写")
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f'items 第 {index} 个元素须为对象（{{"key": "value"}}），'
+                f"实际为 {type(item).__name__}"
+            )
+
+    # 表头 = 所有行键按首次出现顺序的并集
+    headers: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        for key in item:
+            if key not in seen:
+                seen.add(key)
+                headers.append(str(key))
+    if not headers:
+        return ParsedDoc()
+
+    rows: list[list[str]] = [headers]
+    for item in items:
+        row: list[str] = []
+        for header in headers:
+            value = item.get(header)
+            if value is None:
+                row.append("")
+            elif isinstance(value, (list, dict)):
+                row.append(json.dumps(value, ensure_ascii=False))
+            else:
+                row.append(str(value).strip())
+        rows.append(row)
+    return ParsedDoc(tables=[rows])
+
+
 def dispatch_parse(ext: str, data: bytes) -> ParsedDoc:
-    """按扩展名分发解析器；旧格式给出明确另存提示。"""
+    """按扩展名分发解析器；旧格式给出明确另存提示。
+
+    注意：.json 仅对清单类资产（env_inventory/txn_inventory）开放（上传侧
+    扩展名矩阵校验拦截文档类），本函数按扩展名分发、不感知 asset_type。
+    """
     if ext == ".docx":
         return parse_docx(data)
     if ext in (".xlsx", ".xlsm"):
         return parse_xlsx(data)
     if ext == ".pdf":
         return parse_pdf(data)
+    if ext == ".md":
+        return parse_markdown(data)
+    if ext == ".json":
+        return parse_json_inventory(data)
     if ext == ".doc":
         raise UnsupportedFormatError(
             "暂不支持旧版 .doc 格式，请将文件另存为 .docx 后重新上传"

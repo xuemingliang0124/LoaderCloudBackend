@@ -7,17 +7,18 @@ services:
   mysql:
     image: docker.m.daocloud.io/library/mysql:8.4.10
     environment:
-      MYSQL_ROOT_PASSWORD: root123456
-      MYSQL_DATABASE: ptp
-      MYSQL_USER: ptp
-      MYSQL_PASSWORD: ptp123456
+      # 凭据统一从 deploy/.env 插值（本地默认值兜底）；仅首次初始化数据卷时生效
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      MYSQL_DATABASE: ${MYSQL_DB:-ptp}
+      MYSQL_USER: ${MYSQL_USER:-ptp}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-ptp123456}
       TZ: Asia/Shanghai
     ports:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot123456"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root123456}"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -33,8 +34,9 @@ services:
     image: quay.m.daocloud.io/minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      # 与 .env 中 master 客户端凭据同源插值，避免两处手工同步；仅首次初始化数据卷时生效
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
       # 允许 Prometheus 免鉴权抓取 /minio/v2/metrics/cluster（内网监控用）
       MINIO_PROMETHEUS_AUTH_TYPE: public
     ports:

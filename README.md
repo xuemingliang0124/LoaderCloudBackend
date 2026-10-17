@@ -219,7 +219,8 @@ uvicorn app.main:app --reload
 - [x] 生产压力机离线部署 compose + 平台侧 Kibana
 - [x] 文档资产元数据表 + 上传接口（D1，hash 去重 + 类型↔扩展名校验）
 - [x] Qdrant 向量库 + 检索 API（D2，VectorStore Protocol 抽象，业务层禁 import SDK）
-- [x] 文档解析管道（D3，docx/xlsx/pdf 双路输出：文本切片入向量库 + 表格行结构化入库）
+- [x] 文档解析管道（D3，docx/xlsx/pdf/md/json 双路输出：文本切片入向量库 + 表格行结构化入库；.md 全类型支持，.json 仅清单类且仅认 {"items": [...]}）
+- [x] 资产导入模板下载（GET /assets/templates/{asset_type}?fmt=xlsx|json|md，按列映射规则动态生成，清单类三格式 / 文档类 md）
 - [x] Embedding 调用层（D4，OpenAI 兼容协议 + FakeEmbeddings 降级）
 - [x] LangChain 抽象重构（FR-01~04：langchain_loader / langchain_pipeline LCEL 管道）
 

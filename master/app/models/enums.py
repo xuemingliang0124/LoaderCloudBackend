@@ -67,11 +67,16 @@ class GlobalRole(str, Enum):
 class AssetType(str, Enum):
     """文档资产类型：决定 D3 解析管道的处理路径与列映射规则。
 
-    - plan_doc：测试方案文档（docx/pdf）→ 文本切片入向量库
-    - env_inventory：环境交付清单（xlsx）→ 结构化抽取到 test_environment
-    - txn_inventory：交易清单（xlsx）→ 结构化抽取到 test_transaction
-    - sla_doc：SLA 指标文档（docx/pdf）→ 文本切片入向量库
-    - architecture_doc：架构说明文档（docx/pdf/pptx）→ 文本切片入向量库
+    - plan_doc：测试方案文档（docx/pdf/md）→ 文本切片入向量库
+    - env_inventory：环境交付清单（xlsx/md/json）→ 结构化抽取到 test_environment
+    - txn_inventory：交易清单（xlsx/md/json）→ 结构化抽取到 test_transaction
+    - sla_doc：SLA 指标文档（docx/pdf/md）→ 文本切片入向量库
+    - architecture_doc：架构说明文档（docx/pdf/pptx/md）→ 文本切片入向量库
+
+    格式说明：
+    - .md 全类型支持：管道表格按列映射结构化，说明文字切块入向量库
+    - .json 仅清单类支持：仅认 {"items": [...]} 形态，不入向量库
+    - 旧格式 .doc/.xls/.pptx 解析器不支持 → FAILED 并提示另存/导出
     """
 
     PLAN_DOC = "plan_doc"
